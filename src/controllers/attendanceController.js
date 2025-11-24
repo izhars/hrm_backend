@@ -198,36 +198,35 @@ exports.checkOut = async (req, res) => {
         .json({ success: false, message: 'Check-out time cannot be before check-in time' });
     }
 
-    // ── cap at 23:59:59 (or use auto-checkout at 21:00 if you prefer) ───────
+    // ── cap at 23:59:59 ───────────────────────────────────────────────────
     const endOfDay = new Date(today);
     endOfDay.setHours(23, 59, 59, 999);
     const missedCheckout = checkOutTime > endOfDay;
     if (missedCheckout) checkOutTime = endOfDay;
 
-    // ── record checkout ─────────────────────────────────────────────────────
+    // ── SHORT ATTENDANCE LOGIC (CORRECTED) ────────────────────────────────
+    const standardCheckOut = getISTStandardCheckoutTime(); // 18:00 IST
+    
+    // Short attendance = leaving before standard checkout time (6:00 PM)
+    const isShort = checkOutTime < standardCheckOut;
+    
+    let shortByMinutes = 0;
+    if (isShort) {
+      shortByMinutes = Math.round((standardCheckOut - checkOutTime) / (1000 * 60));
+    }
+
+    // ── record checkout ───────────────────────────────────────────────────
     attendance.checkOut = {
       time: checkOutTime,
       location: { latitude, longitude, address },
       deviceInfo,
     };
 
-    // ── work hours ───────────────────────────────────────────────────────────
+    // ── work hours (actual duration) ──────────────────────────────────────
     const workHours = parseFloat(
       ((checkOutTime - attendance.checkIn.time) / (1000 * 60 * 60)).toFixed(2)
     );
     attendance.workHours = workHours;
-
-    // ── SHORT ATTENDANCE LOGIC ─────────────────────────────────────────────
-    const standardOut = getISTStandardCheckoutTime(); // 18:00
-    const expectedFullDayMs = 8 * 60 * 60 * 1000;     // 8 h
-
-    const actualMs = checkOutTime - attendance.checkIn.time;
-    const isShort = actualMs < expectedFullDayMs;
-
-    let shortByMinutes = 0;
-    if (isShort) {
-      shortByMinutes = Math.round((expectedFullDayMs - actualMs) / (1000 * 60));
-    }
 
     attendance.isShortAttendance = isShort;
     attendance.shortByMinutes = shortByMinutes;
