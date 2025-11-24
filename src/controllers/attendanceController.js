@@ -175,6 +175,8 @@ exports.checkIn = async (req, res) => {
 exports.checkOut = async (req, res) => {
   try {
     const { latitude, longitude, address, deviceInfo } = req.body;
+
+    // Use IST-based midnight
     const today = getISTMidnight();
 
     const attendance = await Attendance.findOne({
@@ -183,36 +185,51 @@ exports.checkOut = async (req, res) => {
     });
 
     if (!attendance || !attendance.checkIn?.time) {
-      return res.status(400).json({ success: false, message: 'Please check in first' });
+      return res.status(400).json({
+        success: false,
+        message: "Please check in first",
+      });
     }
+
     if (attendance.checkOut?.time) {
-      return res.status(400).json({ success: false, message: 'Already checked out today' });
+      return res.status(400).json({
+        success: false,
+        message: "Already checked out today",
+      });
     }
 
-    let checkOutTime = getISTDate();
+    let checkOutTime = getISTDate(); // Always IST
 
-    // ── prevent checkout before check-in ───────────────────────────────────
-    if (checkOutTime < attendance.checkIn.time) {
-      return res
-        .status(400)
-        .json({ success: false, message: 'Check-out time cannot be before check-in time' });
+    // ── prevent checkout before check-in (IST safe) ───────────────────────
+    const checkInIST = moment(attendance.checkIn.time).tz("Asia/Kolkata");
+    const checkOutIST = moment(checkOutTime).tz("Asia/Kolkata");
+
+    if (checkOutIST.isBefore(checkInIST)) {
+      return res.status(400).json({
+        success: false,
+        message: "Check-out time cannot be before check-in time",
+      });
     }
 
-    // ── cap at 23:59:59 ───────────────────────────────────────────────────
-    const endOfDay = new Date(today);
-    endOfDay.setHours(23, 59, 59, 999);
-    const missedCheckout = checkOutTime > endOfDay;
-    if (missedCheckout) checkOutTime = endOfDay;
+    // ── cap at 23:59:59 IST ───────────────────────────────────────────────
+    const endOfDayIST = moment(today)
+      .tz("Asia/Kolkata")
+      .endOf("day");
 
-    // ── SHORT ATTENDANCE LOGIC (CORRECTED) ────────────────────────────────
-    const standardCheckOut = getISTStandardCheckoutTime(); // 18:00 IST
-    
-    // Short attendance = leaving before standard checkout time (6:00 PM)
-    const isShort = checkOutTime < standardCheckOut;
-    
+    const missedCheckout = checkOutIST.isAfter(endOfDayIST);
+    if (missedCheckout) {
+      checkOutTime = endOfDayIST.toDate();
+    }
+
+    // ── SHORT ATTENDANCE LOGIC ─────────────────────────────────────────────
+    const standardCheckOutIST = moment(getISTStandardCheckoutTime()).tz("Asia/Kolkata"); // 18:00 IST
+    const finalCheckoutIST = moment(checkOutTime).tz("Asia/Kolkata");
+
+    const isShort = finalCheckoutIST.isBefore(standardCheckOutIST);
+
     let shortByMinutes = 0;
     if (isShort) {
-      shortByMinutes = Math.round((standardCheckOut - checkOutTime) / (1000 * 60));
+      shortByMinutes = standardCheckOutIST.diff(finalCheckoutIST, "minutes");
     }
 
     // ── record checkout ───────────────────────────────────────────────────
@@ -222,12 +239,12 @@ exports.checkOut = async (req, res) => {
       deviceInfo,
     };
 
-    // ── work hours (actual duration) ──────────────────────────────────────
+    // Work hours using pure IST diff
     const workHours = parseFloat(
-      ((checkOutTime - attendance.checkIn.time) / (1000 * 60 * 60)).toFixed(2)
-    );
-    attendance.workHours = workHours;
+      finalCheckoutIST.diff(checkInIST, "minutes") / 60
+    ).toFixed(2);
 
+    attendance.workHours = parseFloat(workHours);
     attendance.isShortAttendance = isShort;
     attendance.shortByMinutes = shortByMinutes;
     if (missedCheckout) attendance.missedCheckout = true;
@@ -237,10 +254,10 @@ exports.checkOut = async (req, res) => {
     res.status(200).json({
       success: true,
       message: missedCheckout
-        ? `Checked out at 23:59 (missed). Work hours: ${workHours}`
+        ? `Checked out at 23:59 (auto). Work hours: ${workHours}`
         : isShort
-          ? `Checked out – **short attendance** by ${shortByMinutes} min. Work hours: ${workHours}`
-          : `Checked out – full day. Work hours: ${workHours}`,
+        ? `Checked out – short attendance by ${shortByMinutes} min. Work hours: ${workHours}`
+        : `Checked out – full day. Work hours: ${workHours}`,
       checkOutTime: formatISTTime(checkOutTime),
       workHours,
       isShortAttendance: isShort,
@@ -249,14 +266,15 @@ exports.checkOut = async (req, res) => {
       attendance: {
         ...attendance.toObject(),
         checkInTimeFormatted: formatISTTime(attendance.checkIn.time),
-        checkOutTimeFormatted: formatISTTime(attendance.checkOut.time),
+        checkOutTimeFormatted: formatISTTime(checkOutTime),
       },
     });
   } catch (error) {
-    console.error('Check-out error:', error);
+    console.error("Check-out error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 
 // @desc    Mark missed checkouts
 // @access  Internal (e.g., cron job)
