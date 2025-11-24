@@ -10,9 +10,9 @@ const {
   getISTMidnight,
   getISTStandardTime,
   getISTStandardCheckoutTime,   // ← correct name
-  getISTAutoCheckoutTime,
   formatISTTime,
-  getCurrentWorkHours,          // ← correct name
+  getCurrentWorkHours,   
+  getISTDay, // ← NEW utility function       // ← correct name
 } = require('../utils/dateUtils');
 
 // @desc    Check in
@@ -34,7 +34,7 @@ exports.checkIn = async (req, res) => {
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
     const weekendType = user.weekendType || "sunday";
-    const day = today.getDay(); // 0 = Sunday, 6 = Saturday
+    const day = getISTDay(today);
     const isWeekend =
       (weekendType === "sunday" && day === 0) ||
       (weekendType === "saturday_sunday" && (day === 0 || day === 6));
