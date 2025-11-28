@@ -6,7 +6,8 @@ const {
   getDepartment,
   createDepartment,
   updateDepartment,
-  deleteDepartment
+  deleteDepartment,
+  toggleDepartmentStatus
 } = require('../controllers/departmentController');
 
 router.use(protect);
@@ -18,6 +19,8 @@ router.route('/')
 router.route('/:id')
   .get(getDepartment)
   .put(authorize('hr', 'superadmin'), updateDepartment)
-  .delete(authorize('superadmin'), deleteDepartment);
+  .delete(authorize('hr', 'superadmin'), deleteDepartment);
+
+router.put('/:id/toggle-status', authorize('hr', 'superadmin'), toggleDepartmentStatus);
 
 module.exports = router;

@@ -1,0 +1,8 @@
+<!-- leave-rejection.html -->
+{{> base title="Leave Rejected" body=(lookup . "content") }}
+{{#*inline "content"}}
+<div class="header">Leave Rejected ❌</div>
+<p>Hi {{firstName}},</p>
+<p>Unfortunately, your leave request from <b>{{fromDate}}</b> to <b>{{toDate}}</b> has been rejected.</p>
+<p>Reason: <b>{{reason}}</b></p>
+{{/inline}}

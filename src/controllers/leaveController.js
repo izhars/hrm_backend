@@ -42,8 +42,6 @@ exports.applyLeave = async (req, res) => {
     const start = new Date(startDate);
     const end = new Date(endDate);
 
-    console.log('[Leave] Parsed start and end dates:', start, end);
-
     if (isNaN(start) || isNaN(end) || start > end) {
       return res.status(400).json({
         success: false,
@@ -51,7 +49,7 @@ exports.applyLeave = async (req, res) => {
       });
     }
 
-    // Validate half-day leave
+    // Half-day validation
     if (leaveDuration === 'half') {
       if (!halfDayType || !['first_half', 'second_half'].includes(halfDayType)) {
         return res.status(400).json({
@@ -59,8 +57,6 @@ exports.applyLeave = async (req, res) => {
           message: 'halfDayType must be "first_half" or "second_half"'
         });
       }
-
-      // Half-day can only be applied for single day
       if (start.toDateString() !== end.toDateString()) {
         return res.status(400).json({
           success: false,
@@ -69,7 +65,7 @@ exports.applyLeave = async (req, res) => {
       }
     }
 
-    // === Check for existing full-day leaves blocking this request ===
+    // === Check for overlapping leaves ===
     const fullDayOverlap = await Leave.findOne({
       employee: req.user.id,
       status: { $in: ['pending', 'approved'] },
@@ -85,7 +81,6 @@ exports.applyLeave = async (req, res) => {
       });
     }
 
-    // === Check half-day overlap if applying half-day leave ===
     if (leaveDuration === 'half') {
       const halfDayOverlap = await Leave.findOne({
         employee: req.user.id,
@@ -128,6 +123,17 @@ exports.applyLeave = async (req, res) => {
       }
     }
 
+    // === Fetch user & probation check ===
+    const user = await User.findById(req.user.id);
+    const today = new Date();
+    if (user.probationEndDate && today < new Date(user.probationEndDate)
+      && leaveType !== 'unpaid' && leaveType !== 'combo') {
+      return res.status(400).json({
+        success: false,
+        message: 'You are on probation. Paid leaves are locked. Only unpaid or combo leave can be applied.'
+      });
+    }
+
     // === Calculate totalDays ===
     let totalDays;
     try {
@@ -135,10 +141,8 @@ exports.applyLeave = async (req, res) => {
     } catch (err) {
       return res.status(400).json({ success: false, message: err.message });
     }
-    console.log('[Leave] Calculated totalDays:', totalDays);
 
-    // === Check leave balance ===
-    const user = await User.findById(req.user.id);
+    // === Check leave balance (after probation check) ===
     if (leaveType !== 'unpaid' && user.leaveBalance[leaveType] < totalDays) {
       return res.status(400).json({
         success: false,
@@ -161,7 +165,7 @@ exports.applyLeave = async (req, res) => {
 
     await leave.populate('employee', 'firstName lastName employeeId email');
 
-    // === Send notification to HR/Admin ===
+    // Send notification to HR/Admin
     await Notification.create({
       title: 'New Leave Application',
       message: `${leave.employee.firstName} ${leave.employee.lastName} has applied for ${leave.leaveType} leave from ${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}.`,
@@ -169,8 +173,6 @@ exports.applyLeave = async (req, res) => {
       role: 'hr',
       meta: { leaveId: leave._id, applicantId: req.user.id },
     });
-
-    console.log('[Leave] Leave application completed:', leave._id);
 
     res.status(201).json({
       success: true,

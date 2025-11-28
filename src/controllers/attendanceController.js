@@ -11,7 +11,7 @@ const {
   getISTStandardTime,
   getISTStandardCheckoutTime,   // ← correct name
   formatISTTime,
-  getCurrentWorkHours,   
+  getCurrentWorkHours,
   getISTDay, // ← NEW utility function       // ← correct name
 } = require('../utils/dateUtils');
 
@@ -85,6 +85,20 @@ exports.checkIn = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Cannot check in, you are on approved leave",
+      });
+    }
+
+    // ── time restriction: no check-in after 6 PM IST ───────────────────────────
+    const currentIST = moment().tz("Asia/Kolkata");
+    const currentHour = currentIST.hour();
+    const currentMinutes = currentIST.minute();
+
+    console.log("IST Current Time:", currentIST.format("HH:mm:ss"));
+
+    if (currentHour >= 18) {
+      return res.status(400).json({
+        success: false,
+        message: "Check-in not allowed after 6 PM. Office closed bro 🛑",
       });
     }
 
@@ -256,8 +270,8 @@ exports.checkOut = async (req, res) => {
       message: missedCheckout
         ? `Checked out at 23:59 (auto). Work hours: ${workHours}`
         : isShort
-        ? `Checked out – short attendance by ${shortByMinutes} min. Work hours: ${workHours}`
-        : `Checked out – full day. Work hours: ${workHours}`,
+          ? `Checked out – short attendance by ${shortByMinutes} min. Work hours: ${workHours}`
+          : `Checked out – full day. Work hours: ${workHours}`,
       checkOutTime: formatISTTime(checkOutTime),
       workHours,
       isShortAttendance: isShort,
@@ -308,75 +322,101 @@ exports.getMyAttendance = async (req, res) => {
     const { startDate, endDate, month, year } = req.query;
     const employeeId = req.user.id;
 
-    const user = await User.findById(employeeId).select('weekendType');
-    const weekendType = user?.weekendType || 'sunday';
+    // Fetch weekend type + dateOfJoining
+    const user = await User.findById(employeeId)
+      .select("weekendType dateOfJoining");
 
-    // ── Date range setup ─────────────────────────────────────────────
-    let start, end;
-    if (startDate && endDate) {
-      start = moment.tz(startDate, 'Asia/Kolkata').startOf('day');
-      end = moment.tz(endDate, 'Asia/Kolkata').endOf('day');
-    } else if (month && year) {
-      start = moment.tz({ year: Number(year), month: Number(month) - 1, day: 1 }, 'Asia/Kolkata').startOf('day');
-      end = moment(start).endOf('month');
-    } else {
-      start = moment.tz('Asia/Kolkata').startOf('month');
-      end = moment(start).endOf('month');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found",
+      });
     }
+
+    const weekendType = user.weekendType || "sunday";
+    const doj = moment(user.dateOfJoining).tz("Asia/Kolkata").startOf("day");
+
+    // Date range setup
+    let start, end;
+
+    if (startDate && endDate) {
+      start = moment.tz(startDate, "Asia/Kolkata").startOf("day");
+      end = moment.tz(endDate, "Asia/Kolkata").endOf("day");
+    } else if (month && year) {
+      start = moment.tz({ year, month: month - 1, day: 1 }, "Asia/Kolkata").startOf("day");
+      end = moment(start).endOf("month");
+    } else {
+      start = moment.tz("Asia/Kolkata").startOf("month");
+      end = moment(start).endOf("month");
+    }
+
+    // FIX: Don’t mark days before joining
+    start = moment.max(start, doj);
 
     const startUTC = start.clone().utc().toDate();
     const endUTC = end.clone().utc().toDate();
 
-    // ── Fetch all data together ──────────────────────────────────────
+    // Fetch all data
     const [attendance, holidays, comboOffs] = await Promise.all([
       Attendance.find({
         employee: employeeId,
         date: { $gte: startUTC, $lte: endUTC },
       }).sort({ date: -1 }).lean(),
+
       Holiday.find({
         date: { $gte: startUTC, $lte: endUTC },
         isActive: true,
       }).lean(),
+
       ComboOff.find({
         employee: employeeId,
         date: { $gte: startUTC, $lte: endUTC },
-        status: { $in: ['approved', 'used', 'earned'] },
+        status: { $in: ["approved", "used", "earned"] },
       }).lean(),
     ]);
 
-    // ── Create quick lookup maps ─────────────────────────────────────
+    // Quick lookup maps
     const holidayMap = new Map(
-      holidays.map((h) => [moment(h.date).format('YYYY-MM-DD'), { name: h.name, type: h.type }])
-    );
-    const attendanceMap = new Map(
-      attendance.map((a) => [moment(a.date).format('YYYY-MM-DD'), a])
-    );
-    const comboOffMap = new Map(
-      comboOffs.map((c) => [moment(c.date).format('YYYY-MM-DD'), c])
+      holidays.map(h => [
+        moment(h.date).format("YYYY-MM-DD"),
+        { name: h.name, type: h.type }
+      ])
     );
 
-    const today = moment.tz('Asia/Kolkata').startOf('day');
+    const attendanceMap = new Map(
+      attendance.map(a => [moment(a.date).format("YYYY-MM-DD"), a])
+    );
+
+    const comboOffMap = new Map(
+      comboOffs.map(c => [moment(c.date).format("YYYY-MM-DD"), c])
+    );
+
+    const today = moment.tz("Asia/Kolkata").startOf("day");
     const totalDays = [];
     let current = start.clone();
 
-    // ── Build the attendance list ────────────────────────────────────
-    while (current.isSameOrBefore(end, 'day') && current.isSameOrBefore(today, 'day')) {
-      const dateKey = current.format('YYYY-MM-DD');
-      const dayOfWeek = current.format('dddd');
+    // Build attendance list
+    while (current.isSameOrBefore(end, "day") && current.isSameOrBefore(today, "day")) {
+      const dateKey = current.format("YYYY-MM-DD");
+      const day = getISTDay(current);  // 0 = Sun, 6 = Sat
+
       const record = attendanceMap.get(dateKey);
       const holiday = holidayMap.get(dateKey);
       const comboOff = comboOffMap.get(dateKey);
 
       let isWeekend = false;
-      if (weekendType === 'sunday') isWeekend = dayOfWeek === 'Sunday';
-      else if (weekendType === 'saturday_sunday')
-        isWeekend = ['Saturday', 'Sunday'].includes(dayOfWeek);
 
-      // ── 1️⃣ Combo Off ───────────────────────────────────────────────
+      if (weekendType === "sunday") {
+        isWeekend = day === 0;
+      } else if (weekendType === "saturday_sunday") {
+        isWeekend = day === 0 || day === 6;
+      }
+
+      // 1. Combo-off
       if (comboOff) {
         totalDays.push({
           date: current.toDate(),
-          status: 'combo-off',
+          status: "combo-off",
           comboOffStatus: comboOff.status,
           remarks: comboOff.remarks || null,
           approvedBy: comboOff.approvedBy || null,
@@ -387,11 +427,11 @@ exports.getMyAttendance = async (req, res) => {
         });
       }
 
-      // ── 2️⃣ Holiday ────────────────────────────────────────────────
+      // 2. Holiday
       else if (holiday) {
         totalDays.push({
           date: current.toDate(),
-          status: 'holiday',
+          status: "holiday",
           holidayName: holiday.name,
           holidayType: holiday.type,
           workHours: 0,
@@ -401,11 +441,11 @@ exports.getMyAttendance = async (req, res) => {
         });
       }
 
-      // ── 3️⃣ Weekend ────────────────────────────────────────────────
+      // 3. Weekend
       else if (isWeekend) {
         totalDays.push({
           date: current.toDate(),
-          status: 'weekly-off',
+          status: "weekly-off",
           workHours: 0,
           checkIn: { time: null },
           checkOut: { time: null },
@@ -413,25 +453,29 @@ exports.getMyAttendance = async (req, res) => {
         });
       }
 
-      // ── 4️⃣ Present / Other Attendance ─────────────────────────────
+      // 4. Present / Half-day / etc.
       else if (record) {
-        const workHours = current.isSame(today, 'day')
+        const workHours = current.isSame(today, "day")
           ? getCurrentWorkHours(record)
           : record.workHours;
 
         totalDays.push({
           ...record,
           workHours,
-          checkInTimeFormatted: record.checkIn?.time ? formatISTTime(record.checkIn.time) : null,
-          checkOutTimeFormatted: record.checkOut?.time ? formatISTTime(record.checkOut.time) : null,
+          checkInTimeFormatted: record.checkIn?.time
+            ? formatISTTime(record.checkIn.time)
+            : null,
+          checkOutTimeFormatted: record.checkOut?.time
+            ? formatISTTime(record.checkOut.time)
+            : null,
         });
       }
 
-      // ── 5️⃣ Absent ────────────────────────────────────────────────
+      // 5. Absent
       else {
         totalDays.push({
           date: current.toDate(),
-          status: 'absent',
+          status: "absent",
           workHours: 0,
           checkIn: { time: null },
           checkOut: { time: null },
@@ -439,21 +483,21 @@ exports.getMyAttendance = async (req, res) => {
         });
       }
 
-      current.add(1, 'day');
+      current.add(1, "day");
     }
 
-    // ── Summary Stats ────────────────────────────────────────────────
+    // Summary
     const stats = {
       totalDays: totalDays.length,
-      present: totalDays.filter((a) => a.status === 'present').length,
-      absent: totalDays.filter((a) => a.status === 'absent').length,
-      halfDay: totalDays.filter((a) => a.status === 'half-day').length,
-      onLeave: totalDays.filter((a) => a.status === 'on-leave').length,
-      holiday: totalDays.filter((a) => a.status === 'holiday').length,
-      weeklyOff: totalDays.filter((a) => a.status === 'weekly-off').length,
-      comboOff: totalDays.filter((a) => a.status === 'combo-off').length,
-      totalWorkHours: totalDays.reduce((sum, a) => sum + (a.workHours || 0), 0),
-      lateCount: totalDays.filter((a) => a.isLate).length,
+      present: totalDays.filter(a => a.status === "present").length,
+      absent: totalDays.filter(a => a.status === "absent").length,
+      halfDay: totalDays.filter(a => a.status === "half-day").length,
+      onLeave: totalDays.filter(a => a.status === "on-leave").length,
+      holiday: totalDays.filter(a => a.status === "holiday").length,
+      weeklyOff: totalDays.filter(a => a.status === "weekly-off").length,
+      comboOff: totalDays.filter(a => a.status === "combo-off").length,
+      totalWorkHours: totalDays.reduce((s, a) => s + (a.workHours || 0), 0),
+      lateCount: totalDays.filter(a => a.isLate).length,
     };
 
     res.status(200).json({
@@ -462,11 +506,13 @@ exports.getMyAttendance = async (req, res) => {
       stats,
       attendance: totalDays,
     });
+
   } catch (error) {
-    console.error('Attendance fetch error:', error);
+    console.error("Attendance fetch error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 
 
 
@@ -1300,20 +1346,20 @@ exports.getWorkHoursChartMonthly = async (req, res) => {
     if (startDate && endDate) {
       // Custom range
       start = moment.tz(startDate, tz).startOf('day');
-      end   = moment.tz(endDate,   tz).endOf('day');
+      end = moment.tz(endDate, tz).endOf('day');
     } else if (month && year) {
       // Specific month/year
       start = moment.tz({ year: +year, month: +month - 1, day: 1 }, tz).startOf('day');
-      end   = moment(start).endOf('month');
+      end = moment(start).endOf('month');
     } else {
       // DEFAULT: current month in IST
       const now = moment.tz(tz);
       start = now.clone().startOf('month');
-      end   = now.clone().endOf('month');
+      end = now.clone().endOf('month');
     }
 
     const startUTC = start.clone().utc().toDate();
-    const endUTC   = end.clone().utc().toDate();
+    const endUTC = end.clone().utc().toDate();
 
     // ── 2. Fetch attendance (only present days) ─────────────────────────
     const records = await Attendance.find({
@@ -1349,14 +1395,14 @@ exports.getWorkHoursChartMonthly = async (req, res) => {
 
     // ── 5. Summary ───────────────────────────────────────────────────────
     const totalHours = chartData.reduce((s, d) => s + d.workHours, 0);
-    const avgHours   = chartData.length ? (totalHours / chartData.filter(d => d.workHours > 0).length || 1).toFixed(2) : '0';
+    const avgHours = chartData.length ? (totalHours / chartData.filter(d => d.workHours > 0).length || 1).toFixed(2) : '0';
 
     // ── 6. Response ──────────────────────────────────────────────────────
     res.status(200).json({
       success: true,
       period: {
         from: start.format('YYYY-MM-DD'),
-        to:   end.format('YYYY-MM-DD'),
+        to: end.format('YYYY-MM-DD'),
         display: start.format('MMM YYYY'), // e.g. "Nov 2025"
       },
       summary: {

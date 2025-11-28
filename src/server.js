@@ -13,6 +13,7 @@ const mongoose = require('mongoose');
 const connectDB = require('./config/db');
 const errorHandler = require('./middleware/errorHandler');
 const cronJobs = require('./utils/cronJobs');
+const emailService = require('./utils/emailService');
 
 const authRoutes = require('./routes/authRoutes');
 const employeeRoutes = require('./routes/employeeRoutes');
@@ -32,31 +33,47 @@ const awardRoutes = require('./routes/awardRoutes');
 const badgeRoutes = require('./routes/badgeRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const cronTestRoutes = require('./routes/cronTestRoutes');
-const comboOffRoutes = require('./routes/comboOffRoutes')
+const comboOffRoutes = require('./routes/comboOffRoutes');
 const faqRoutes = require('./routes/faqRoutes');
 const helpRoutes = require('./routes/helpRoutes');
 const ticketRoutes = require('./routes/ticketRoutes');
 const aboutRoutes = require('./routes/aboutRoutes');
+const emailRoutes = require('./routes/emailRoutes');
+const createSuperAdmin = require('./seedAdmin');
 
 const { initChat } = require('./socket/chat');
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(helmet());
+// Security & Middleware
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        "form-action": ["'self'"],
+        "script-src": ["'self'", "'unsafe-inline'"],
+      },
+    },
+  })
+);
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: 'Too many requests, please try again later.',
-});
-app.use('/api/', limiter);
+// Serve static files (for CSS, JS, images)
+app.use(express.static(path.join(__dirname, 'public')));
 
+// Serve uploaded files
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
+// Password Reset Page Route (before API routes)
+app.get('/reset-password/:token', (req, res) => {
+    res.sendFile(path.join(__dirname, 'email', 'reset-password.html'));
+});
+
+// API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/employees', employeeRoutes);
 app.use('/api/attendance', attendanceRoutes);
@@ -76,13 +93,13 @@ app.use('/api/badges', badgeRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/cron', cronTestRoutes);
 app.use('/api/combooff', comboOffRoutes);
-// Use routes
 app.use('/api/faqs', faqRoutes);
 app.use('/api/help-topics', helpRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/about', aboutRoutes);
+app.use('/api/email', emailRoutes);
 
-
+// Health Check
 app.get('/api/health', (req, res) => {
   res.status(200).json({
     success: true,
@@ -91,39 +108,61 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Root Route
 app.get('/', (req, res) => {
   res.status(200).json({
     success: true,
-    message: 'Welcome to HRMS API with Real-Time Chat',
+    message: 'Welcome to HRMS API with Real-Time Chat & Email Service',
     version: '1.0.0',
     documentation: '/api/docs',
   });
 });
 
+// 404 Handler
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'Route not found' });
 });
 
+// Error Handler
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 
-// ✅ Wait for MongoDB connection before starting cron + server
+// Start Server after MongoDB connection
 connectDB()
   .then(async () => {
     console.log('✅ MongoDB connected successfully');
 
-    // Start cron jobs only after DB connection
+    // Initialize services
     await cronJobs.startCronJobs();
-
+    await createSuperAdmin();
+    
+    // Verify email service
+    try {
+      await emailService.verifyEmailConfig();
+      console.log('✅ Email service initialized successfully');
+    } catch (error) {
+      console.error('❌ Email service initialization failed:', error.message);
+      console.warn('⚠️  Server will continue but emails may not work');
+      console.warn('⚠️  Please check your .env email configuration');
+    }
+    
+    // Initialize Socket.IO
     const io = initChat(server);
+    
+    // Start server
     server.listen(PORT, () => {
       console.log(`
-Environment : ${process.env.NODE_ENV || 'development'}
-Port        : ${PORT}
-API         : http://localhost:${PORT}/api
-Socket      : ws://localhost:${PORT}
-`);
+╔════════════════════════════════════════════╗
+║         HRMS Server Started                ║
+╠════════════════════════════════════════════╣
+║ Environment : ${process.env.NODE_ENV || 'development'}
+║ Port        : ${PORT}
+║ API         : http://localhost:${PORT}/api
+║ Socket      : ws://localhost:${PORT}
+║ Reset Page  : http://localhost:${PORT}/reset-password/:token
+║ Email       : ${process.env.EMAIL_HOST || 'Not Configured'}
+╚════════════════════════════════════════════╝`);
     });
   })
   .catch((err) => {
@@ -133,11 +172,22 @@ Socket      : ws://localhost:${PORT}
 
 // Graceful shutdown
 process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Rejection:', err.message);
-  process.exit(1);
+  console.error('❌ Unhandled Rejection:', err.message);
+  server.close(() => process.exit(1));
 });
 
 process.on('SIGTERM', () => {
-  console.log('SIGTERM RECEIVED. Shutting down gracefully');
-  process.exit(0);
+  console.log('🛑 SIGTERM received. Shutting down gracefully...');
+  server.close(() => {
+    console.log('✅ Process terminated');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('🛑 SIGINT received. Shutting down gracefully...');
+  server.close(() => {
+    console.log('✅ Process terminated');
+    process.exit(0);
+  });
 });

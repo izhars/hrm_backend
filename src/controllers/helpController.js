@@ -1,4 +1,5 @@
 const HelpTopic = require('../models/helpTopic');
+const mongoose = require('mongoose');
 
 // Helper: Normalize string
 const normalize = (str) => str?.trim();
@@ -65,21 +66,29 @@ exports.getTopicById = async (req, res) => {
 // POST /api/help - Create new topic
 exports.addTopic = async (req, res) => {
   try {
+    console.log('=== Add Topic Attempt ===');
+    console.log('Request body:', req.body);
+
     const { title, icon, description } = req.body;
 
     // Validation
     if (!title || typeof title !== 'string') {
+      console.log('Validation failed: Title missing or not a string');
       return res.status(400).json({ success: false, error: 'Title is required and must be a string' });
     }
 
     const normalizedTitle = normalize(title);
     if (!normalizedTitle) {
+      console.log('Validation failed: Normalized title is empty');
       return res.status(400).json({ success: false, error: 'Title cannot be empty' });
     }
+
+    console.log('Normalized title:', normalizedTitle);
 
     // Check duplicate
     const exists = await HelpTopic.findOne({ title: normalizedTitle });
     if (exists) {
+      console.log('Duplicate topic found:', normalizedTitle);
       return res.status(400).json({ success: false, error: 'A topic with this title already exists' });
     }
 
@@ -89,9 +98,14 @@ exports.addTopic = async (req, res) => {
       description: normalize(description)
     });
 
+    console.log('Saving new topic:', topic);
+
     await topic.save();
+    console.log('Topic saved successfully:', topic._id);
+
     res.status(201).json({ success: true, data: topic });
   } catch (err) {
+    console.error('Error while adding topic:', err);
     if (err.code === 11000) {
       return res.status(400).json({ success: false, error: 'Topic title must be unique' });
     }
@@ -101,6 +115,7 @@ exports.addTopic = async (req, res) => {
     });
   }
 };
+
 
 // PUT /api/help/:id - Update topic
 exports.updateTopic = async (req, res) => {
@@ -160,18 +175,25 @@ exports.updateTopic = async (req, res) => {
 exports.deleteTopic = async (req, res) => {
   try {
     const { id } = req.params;
+    console.log(`=== Delete Topic Attempt ===`);
+    console.log(`Performed by User: ${req.user?._id} Role: ${req.user?.role}`);
+    console.log(`Topic ID to delete: ${id}`);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
+      console.log(`Invalid topic ID: ${id}`);
       return res.status(400).json({ success: false, error: 'Invalid topic ID' });
     }
 
     const topic = await HelpTopic.findByIdAndDelete(id);
     if (!topic) {
+      console.log(`Topic not found: ${id}`);
       return res.status(404).json({ success: false, error: 'Topic not found' });
     }
 
+    console.log(`Topic deleted successfully: ${id}`);
     res.status(200).json({ success: true, message: 'Topic deleted successfully' });
   } catch (err) {
+    console.error(`Error deleting topic: ${err.message}`, err);
     res.status(500).json({
       success: false,
       error: process.env.NODE_ENV === 'production' ? 'Failed to delete topic' : err.message

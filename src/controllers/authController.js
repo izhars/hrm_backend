@@ -3,6 +3,9 @@ const Department = require('../models/Department');
 const mongoose = require('mongoose');
 const cloudinary = require('../config/cloudinary');
 const fs = require('fs');
+const emailService = require('../utils/emailService'); // adjust path if needed
+const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5000';
+const { generateForgotPasswordEmail } = require('../email/forgotPasswordEmail');
 
 // Generate JWT Token
 const generateToken = (id, role, employeeId) => {
@@ -211,6 +214,11 @@ exports.register = async (req, res) => {
     console.log('- departmentId:', departmentId, 'Valid:', mongoose.Types.ObjectId.isValid(departmentId));
     console.log('- reportingManagerId:', reportingManagerId, 'Valid:', reportingManagerId ? mongoose.Types.ObjectId.isValid(reportingManagerId) : 'null (as expected)');
 
+    // Probation Logic
+    const probationStart = dateOfJoining ? new Date(dateOfJoining) : new Date();
+    const probationEnd = new Date(probationStart);
+    probationEnd.setMonth(probationEnd.getMonth() + 6);
+
     // Create user data object
     const userData = {
       employeeId: employeeId.trim().toUpperCase(),
@@ -242,7 +250,18 @@ exports.register = async (req, res) => {
       profilePicture: profilePicture || '',
       createdBy: req.user._id,
       isVerified: userRole === 'superadmin',
-      weekendType: weekendType || 'sunday', // ✅ added
+      weekendType: weekendType || 'sunday',
+      // 🔥 Probation Fields Added Here
+      probationStartDate: probationStart,
+      probationEndDate: probationEnd,
+      isProbationCompleted: false,
+      // 🔥 Force ZERO Paid Leaves During Probation
+      leaveBalance: {
+        casual: 0,
+        sick: 0,
+        earned: 0,
+        unpaid: 0
+      }
     };
 
     console.log('Creating user with role-based reporting logic...');
@@ -252,6 +271,17 @@ exports.register = async (req, res) => {
     await user.save();
 
     console.log('User successfully created:', user._id, user.employeeId, 'Role:', user.role, 'ReportingManager:', user.reportingManager);
+
+    // 🔥 NEW: Send welcome email with login credentials
+    try {
+      if (['hr', 'superadmin'].includes(userRole)) {
+        await emailService.sendWelcomeEmail(user, password);
+        console.log('Welcome email sent successfully to:', user.email);
+      }
+    } catch (emailError) {
+      console.error('Failed to send welcome email:', emailError);
+      // Don't fail the registration if email fails, just log it
+    }
 
     // Calculate net salary
     try {
@@ -578,9 +608,9 @@ exports.updateProfile = async (req, res) => {
 exports.updateProfilePicture = async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'No file uploaded or invalid file type' 
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded or invalid file type'
       });
     }
 
@@ -609,9 +639,9 @@ exports.updateProfilePicture = async (req, res) => {
     // Update user profile picture in DB
     const user = await User.findById(req.user.id);
     if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
       });
     }
 
@@ -642,7 +672,7 @@ exports.updateProfilePicture = async (req, res) => {
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
-    
+
     console.error('Update profile picture error:', error);
     res.status(500).json({
       success: false,
@@ -700,6 +730,7 @@ exports.changePassword = async (req, res) => {
   }
 };
 
+
 // @desc    Forgot password
 // @route   POST /api/auth/forgot-password
 // @access  Public
@@ -710,98 +741,95 @@ exports.forgotPassword = async (req, res) => {
     if (!email) {
       return res.status(400).json({
         success: false,
-        message: 'Email is required'
+        message: 'Please provide an email'
       });
     }
 
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email }).select('+resetPasswordToken +resetPasswordExpire');
 
     if (!user) {
       return res.status(404).json({
         success: false,
-        message: 'No user found with this email'
+        message: 'No user found with that email'
       });
     }
 
-    // Generate reset token
+    // Generate token
     const resetToken = user.getResetPasswordToken();
     await user.save({ validateBeforeSave: false });
 
-    // TODO: Send email with resetToken
-    console.log(`Reset token for ${email}: ${resetToken}`);
-    // In production, send email using nodemailer or email service
+    // Create reset URL
+    const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
+    console.log('Password reset URL:', resetUrl);
 
-    res.status(200).json({
-      success: true,
-      message: 'Password reset token sent to email',
-      data: { resetToken } // Remove in production
-    });
+    // Generate HTML email
+    const html = generateForgotPasswordEmail(resetUrl);
+
+    try {
+      // Send email
+      await emailService.sendEmail({ 
+        to: user.email, 
+        subject: 'HRMS Password Reset', 
+        html 
+      });
+
+      res.status(200).json({
+        success: true,
+        message: 'Password reset email sent successfully'
+      });
+    } catch (err) {
+      console.error('Email send failed:', err);
+      // Reset token if email failed
+      user.resetPasswordToken = undefined;
+      user.resetPasswordExpire = undefined;
+      await user.save({ validateBeforeSave: false });
+
+      return res.status(500).json({
+        success: false,
+        message: 'Email could not be sent. Please try again later.'
+      });
+    }
 
   } catch (error) {
     console.error('Forgot password error:', error);
     res.status(500).json({
       success: false,
-      message: error.message
+      message: 'Server error'
     });
   }
 };
 
+
+
 // @desc    Reset password
-// @route   PUT /api/auth/reset-password/:token
+// @route   PUT /api/auth/reset-password/:resettoken
 // @access  Public
 exports.resetPassword = async (req, res) => {
   try {
-    const { password } = req.body;
-    const { token } = req.params;
-
-    if (!password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Password is required'
-      });
-    }
-
-    // Hash the token to match the stored hashed token
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(token)
-      .digest('hex');
+    const resetPasswordToken = req.params.token; // FIXED NAME
 
     const user = await User.findOne({
-      resetPasswordToken: hashedToken,
+      resetPasswordToken,
       resetPasswordExpire: { $gt: Date.now() }
-    });
+    }).select('+password');
 
     if (!user) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid or expired token'
+        message: 'Invalid or expired reset token'
       });
     }
 
-    // Set new password
-    user.password = password;
+    user.password = req.body.password;
     user.resetPasswordToken = undefined;
     user.resetPasswordExpire = undefined;
-    user.isVerified = true;
-
     await user.save();
-
-    const jwtToken = generateToken(user._id, user.role, user.employeeId);
 
     res.status(200).json({
       success: true,
-      message: 'Password reset successful',
-      token: jwtToken,
-      user: {
-        id: user._id,
-        email: user.email,
-        role: user.role
-      }
+      message: 'Password reset successful'
     });
-
   } catch (error) {
-    console.error('Reset password error:', error);
     res.status(500).json({
       success: false,
       message: error.message

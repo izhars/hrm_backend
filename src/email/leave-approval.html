@@ -1,0 +1,37 @@
+<div class="email-container">
+    {{> header}}
+    
+    <div class="content">
+        <h2>📅 New Leave Request</h2>
+        
+        <p>Hello {{managerName}},</p>
+        
+        <p>You have received a new leave request that requires your approval:</p>
+        
+        <div class="info-box">
+            <p style="margin: 0;"><strong>Leave Details:</strong></p>
+            <p style="margin: 5px 0 0 0;">
+                <strong>Employee:</strong> {{employeeName}}<br>
+                <strong>Leave Type:</strong> {{uppercase leaveType}}<br>
+                <strong>Start Date:</strong> {{formatDate startDate}}<br>
+                <strong>End Date:</strong> {{formatDate endDate}}<br>
+                <strong>Reason:</strong> {{reason}}
+            </p>
+        </div>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="{{approvalUrl}}" class="btn" style="background-color: #28a745; margin-right: 10px;">
+                ✓ Approve
+            </a>
+            <a href="{{rejectUrl}}" class="btn" style="background-color: #dc3545;">
+                ✗ Reject
+            </a>
+        </div>
+        
+        <p class="text-muted">
+            Please review and respond to this request at your earliest convenience. You can also manage this request from the HRMS portal.
+        </p>
+    </div>
+    
+    {{> footer}}
+</div>
