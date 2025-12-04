@@ -18,7 +18,8 @@ const {
   getTodayAllEmployeesAttendance, // New API
   getAllEmployeesAttendance,
   getEmployeeWorkHoursChart,
-  getWorkHoursChartMonthly
+  getWorkHoursChartMonthly,
+  exportMonthlyAttendanceExcel
 } = require('../controllers/attendanceController');
 
 // Protect all routes
@@ -46,5 +47,7 @@ router.post('/mark-status', authorize('hr', 'superadmin'), markStatus);
 router.post('/bulk-upload', authorize('hr', 'superadmin'), bulkUploadAttendance);
 router.delete('/:attendanceId/action', authorize('hr', 'superadmin'), cancelAction);
 router.get('/export', authorize('hr', 'superadmin'), exportAttendance);
+// Add this route (HR/Admin only)
+router.get('/export-monthly', authorize('hr', 'superadmin'), exportMonthlyAttendanceExcel);
 
 module.exports = router;

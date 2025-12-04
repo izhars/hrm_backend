@@ -49,7 +49,7 @@ exports.applyLeave = async (req, res) => {
       });
     }
 
-    // Half-day validation
+    // === Half-day validation ===
     if (leaveDuration === 'half') {
       if (!halfDayType || !['first_half', 'second_half'].includes(halfDayType)) {
         return res.status(400).json({
@@ -65,7 +65,36 @@ exports.applyLeave = async (req, res) => {
       }
     }
 
-    // === Check for overlapping leaves ===
+    // === Fetch holidays in range ===
+    const holidays = await Holiday.find({
+      date: { $gte: start, $lte: end },
+      isActive: true
+    }).select('date');
+    const holidayDates = holidays.map(h => h.date.toDateString());
+
+    // === Filter leave days to exclude holidays ===
+    let leaveDays = [];
+    if (leaveDuration === 'full') {
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        if (!holidayDates.includes(d.toDateString())) {
+          leaveDays.push(new Date(d));
+        }
+      }
+    } else {
+      // Half-day leave: check if it's a holiday
+      if (!holidayDates.includes(start.toDateString())) {
+        leaveDays.push(new Date(start));
+      }
+    }
+
+    if (leaveDays.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'All selected dates are holidays. Leave cannot be applied.'
+      });
+    }
+
+    // === Check for overlapping full-day leaves ===
     const fullDayOverlap = await Leave.findOne({
       employee: req.user.id,
       status: { $in: ['pending', 'approved'] },
@@ -81,6 +110,7 @@ exports.applyLeave = async (req, res) => {
       });
     }
 
+    // === Check for overlapping half-day leaves ===
     if (leaveDuration === 'half') {
       const halfDayOverlap = await Leave.findOne({
         employee: req.user.id,
@@ -116,9 +146,10 @@ exports.applyLeave = async (req, res) => {
           });
         }
       } else {
+        const punchedDates = attendance.map(a => a.date.toDateString());
         return res.status(400).json({
           success: false,
-          message: `You already punched in on ${attendance[0].date.toDateString()}, leave not allowed for this date.`
+          message: `You already punched in on ${punchedDates.join(', ')}, leave not allowed for these dates.`
         });
       }
     }
@@ -134,15 +165,22 @@ exports.applyLeave = async (req, res) => {
       });
     }
 
-    // === Calculate totalDays ===
+    // === Calculate totalDays, excluding holidays ===
     let totalDays;
     try {
-      totalDays = await getWorkingDays(start, end, leaveDuration, halfDayType, leaveType);
+      totalDays = await getWorkingDays(
+        leaveDays[0],
+        leaveDays[leaveDays.length - 1],
+        leaveDuration,
+        halfDayType,
+        leaveType,
+        holidayDates // pass holidays to skip
+      );
     } catch (err) {
       return res.status(400).json({ success: false, message: err.message });
     }
 
-    // === Check leave balance (after probation check) ===
+    // === Check leave balance ===
     if (leaveType !== 'unpaid' && user.leaveBalance[leaveType] < totalDays) {
       return res.status(400).json({
         success: false,
@@ -156,8 +194,8 @@ exports.applyLeave = async (req, res) => {
       leaveType,
       leaveDuration,
       halfDayType: leaveDuration === 'half' ? halfDayType : null,
-      startDate: start,
-      endDate: end,
+      startDate: leaveDays[0],
+      endDate: leaveDays[leaveDays.length - 1],
       totalDays,
       reason,
       documents: documents || []
@@ -165,7 +203,7 @@ exports.applyLeave = async (req, res) => {
 
     await leave.populate('employee', 'firstName lastName employeeId email');
 
-    // Send notification to HR/Admin
+    // === Send notification to HR/Admin ===
     await Notification.create({
       title: 'New Leave Application',
       message: `${leave.employee.firstName} ${leave.employee.lastName} has applied for ${leave.leaveType} leave from ${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}.`,
@@ -176,7 +214,7 @@ exports.applyLeave = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: 'Leave applied successfully. Notification sent to HR and Admin.',
+      message: 'Leave applied successfully. Holidays were skipped in calculation. Notification sent to HR and Admin.',
       leave
     });
 
@@ -185,9 +223,6 @@ exports.applyLeave = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
-
-
 
 // ================================
 // 2. Get My Leaves

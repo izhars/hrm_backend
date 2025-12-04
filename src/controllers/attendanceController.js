@@ -4,6 +4,7 @@ const Holiday = require('../models/Holiday');
 const Leave = require('../models/Leave');
 const moment = require('moment-timezone');
 const ComboOff = require('../models/ComboOff');
+const ExcelJS = require('exceljs');
 
 const {
   getISTDate,
@@ -935,31 +936,31 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
     const today = getISTMidnight();
     const { department } = req.query; // Optional department filter
 
-    // Build query
+    // Roles to include: employee, manager, hr
+    const rolesToInclude = ['employee', 'manager', 'hr'];
+
+    // Build query for attendance records
     const query = { date: today };
     if (department) {
       const employees = await User.find({
         department,
         isActive: true,
-        role: { $in: ['employee', 'manager'] },
+        role: { $in: rolesToInclude },
       }).select('_id');
       query.employee = { $in: employees.map((e) => e._id) };
     }
 
     // Fetch today's attendance records
     const attendanceRecords = await Attendance.find(query)
-      .populate('employee', 'firstName lastName employeeId email department')
+      .populate('employee', 'firstName lastName employeeId email department role')
       .lean();
 
-    // Fetch all active employees (only employee + manager roles)
-    const employeeQuery = {
-      isActive: true,
-      role: { $in: ['employee', 'manager'] },
-    };
+    // Fetch all active users (employee + manager + hr)
+    const employeeQuery = { isActive: true, role: { $in: rolesToInclude } };
     if (department) employeeQuery.department = department;
 
     const employees = await User.find(employeeQuery)
-      .select('firstName lastName employeeId email department')
+      .select('firstName lastName employeeId email department role')
       .populate('department', 'name')
       .lean();
 
@@ -1012,6 +1013,7 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
             name: `${employee.firstName} ${employee.lastName}`,
             email: employee.email,
             department: employee.department?.name,
+            role: employee.role,
           },
           status: 'on-leave',
           leaveType: leave.type,
@@ -1028,6 +1030,7 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
             name: `${employee.firstName} ${employee.lastName}`,
             email: employee.email,
             department: employee.department?.name,
+            role: employee.role,
           },
           status: record.status,
           checkIn: record.checkIn
@@ -1056,6 +1059,7 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
             name: `${employee.firstName} ${employee.lastName}`,
             email: employee.email,
             department: employee.department?.name,
+            role: employee.role,
           },
           status: 'absent',
           checkIn: null,
@@ -1078,6 +1082,7 @@ exports.getTodayAllEmployeesAttendance = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
 
 
 exports.getAllEmployeesAttendance = async (req, res) => {
@@ -1415,6 +1420,229 @@ exports.getWorkHoursChartMonthly = async (req, res) => {
 
   } catch (error) {
     console.error('Work-hours chart error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Export Monthly Attendance Report (FULL HR VERSION - FIXED)
+// @route   GET /api/attendance/export-monthly?month=12&year=2025&format=xlsx
+//          OR /api/attendance/export-current-month
+// @access  Private (hr, superadmin)
+exports.exportMonthlyAttendanceExcel = async (req, res) => {
+  try {
+    const { month, year, format = 'xlsx', department } = req.query;
+
+    // Auto-detect current month/year in IST
+    const now = moment().tz('Asia/Kolkata');
+    const selectedMonth = month ? parseInt(month) : now.month() + 1;
+    const selectedYear = year ? parseInt(year) : now.year();
+
+    if (selectedMonth < 1 || selectedMonth > 12) {
+      return res.status(400).json({ success: false, message: "Invalid month" });
+    }
+
+    const startDate = moment.tz({ year: selectedYear, month: selectedMonth - 1, day: 1 }, 'Asia/Kolkata').startOf('day');
+    const endDate = startDate.clone().endOf('month').endOf('day');
+
+    // Fetch employees excluding admin and superadmin
+    const employeeQuery = {
+      isActive: true,
+      role: { $nin: ['admin', 'superadmin'] } // exclude both roles
+    };
+    if (department) employeeQuery.department = department;
+
+    const employees = await User.find(employeeQuery)
+      .select('firstName lastName employeeId email department designation weekendType role')
+      .populate('department', 'name')
+      .lean();
+
+
+    if (employees.length === 0) {
+      return res.status(404).json({ success: false, message: "No employees found" });
+    }
+
+    // Fetch all data
+    const [attendances, holidays, comboOffs, leaves] = await Promise.all([
+      Attendance.find({ date: { $gte: startDate.toDate(), $lte: endDate.toDate() } }).lean(),
+      Holiday.find({ date: { $gte: startDate.toDate(), $lte: endDate.toDate() }, isActive: true }).lean(),
+      ComboOff.find({ date: { $gte: startDate.toDate(), $lte: endDate.toDate() }, status: { $in: ['approved', 'earned', 'used'] } }).lean(),
+      Leave.find({
+        startDate: { $lte: endDate.toDate() },
+        endDate: { $gte: startDate.toDate() },
+        status: 'approved'
+      }).lean()
+    ]);
+
+    // Build lookup maps
+    const holidayMap = new Map(holidays.map(h => [moment(h.date).tz('Asia/Kolkata').format('YYYY-MM-DD'), h.name]));
+    const comboOffMap = new Map(comboOffs.map(c => [c.employee.toString() + '-' + moment(c.date).tz('Asia/Kolkata').format('YYYY-MM-DD'), true]));
+    const leaveMap = new Map();
+
+    leaves.forEach(leave => {
+      let current = moment(leave.startDate).tz('Asia/Kolkata').startOf('day');
+      const end = moment(leave.endDate).tz('Asia/Kolkata').startOf('day');
+      while (current.isSameOrBefore(end, 'day')) {
+        const key = leave.employee.toString() + '-' + current.format('YYYY-MM-DD');
+        leaveMap.set(key, {
+          type: leave.leaveType,
+          duration: leave.leaveDuration || 'full',
+          halfDayType: leave.halfDayType
+        });
+        current.add(1, 'day');
+      }
+    });
+
+    const attendanceMap = new Map();
+    attendances.forEach(a => {
+      const key = a.employee.toString() + '-' + moment(a.date).tz('Asia/Kolkata').format('YYYY-MM-DD');
+      attendanceMap.set(key, a);
+    });
+
+    const rows = [];
+
+    for (const emp of employees) {
+      const weekendType = emp.weekendType || 'sunday';
+      let present = 0, absent = 0, onLeave = 0, halfDays = 0;
+      let lateCount = 0, totalLateMins = 0, shortCount = 0, totalShortMins = 0;
+      let totalHours = 0, overtimeHours = 0;
+      let firstCheckIn = null, lastCheckOut = null;
+      let weeklyOffs = 0, holidaysCount = 0, comboOffUsed = 0;
+
+      let current = startDate.clone();
+      while (current.isSameOrBefore(endDate, 'day')) {
+        const dateStr = current.format('YYYY-MM-DD');
+        const day = current.day();
+        const key = emp._id.toString() + '-' + dateStr;
+
+        const isWeekend = (weekendType === 'sunday' && day === 0) ||
+          (weekendType === 'saturday_sunday' && (day === 0 || day === 6));
+        const isHoliday = holidayMap.has(dateStr);
+        const isComboOff = comboOffMap.has(key);
+        const leaveData = leaveMap.get(key);
+        const record = attendanceMap.get(key);
+
+        if (isWeekend) weeklyOffs++;
+        if (isHoliday) holidaysCount++;
+        if (isComboOff) comboOffUsed++;
+
+        if (isComboOff || isHoliday || isWeekend) {
+          // Skip
+        } else if (leaveData) {
+          if (leaveData.duration === 'half') {
+            onLeave += 0.5;
+            halfDays++;
+          } else {
+            onLeave += 1;
+          }
+        } else if (record) {
+          const hours = parseFloat(record.workHours) || 0;
+          totalHours += hours;
+
+          if (record.checkIn?.time && (!firstCheckIn || record.checkIn.time < firstCheckIn))
+            firstCheckIn = record.checkIn.time;
+          if (record.checkOut?.time && (!lastCheckOut || record.checkOut.time > lastCheckOut))
+            lastCheckOut = record.checkOut.time;
+
+          if (record.isLate) { lateCount++; totalLateMins += record.lateBy || 0; }
+          if (record.isShortAttendance) { shortCount++; totalShortMins += record.shortByMinutes || 0; }
+
+          if (hours >= 8) {
+            present++;
+            if (hours > 9) overtimeHours += (hours - 9);
+          } else if (hours >= 4) {
+            halfDays++;
+            present++;
+          } else {
+            absent++;
+          }
+        } else {
+          absent++;
+        }
+
+        current.add(1, 'day');
+      }
+
+      const workableDays = present + absent + onLeave;
+      const attendancePercent = workableDays > 0 ? ((present + halfDays * 0.5) / workableDays * 100).toFixed(2) : '0.00';
+
+      rows.push({
+        'Emp ID': emp.employeeId || '-',
+        'Employee Name': `${emp.firstName} ${emp.lastName}`.trim(),
+        'Department': emp.department?.name || 'N/A',
+        'Designation': emp.designation || 'N/A',
+        'Email': emp.email,
+        'Month': startDate.format('MMMM YYYY'),
+        'Total Days': startDate.daysInMonth(),
+        'Working Days': workableDays.toFixed(1),
+        'Present': present,
+        'Half Days': halfDays,
+        'Absent': absent,
+        'On Leave': onLeave % 1 === 0 ? onLeave : parseFloat(onLeave.toFixed(1)),
+        'Weekly Offs': weeklyOffs,
+        'Holidays': holidaysCount,
+        'Combo Off Used': comboOffUsed,
+        'Late Arrivals': lateCount,
+        'Late By (Mins)': totalLateMins,
+        'Short Attendance': shortCount,
+        'Short By (Mins)': totalShortMins,
+        'Total Work Hours': totalHours.toFixed(2),
+        'Avg Hours/Present Day': present > 0 ? (totalHours / present).toFixed(2) : '0.00',
+        'Overtime Hours': overtimeHours.toFixed(2),
+        'First Check-in': firstCheckIn ? moment(firstCheckIn).tz('Asia/Kolkata').format('DD MMM, hh:mm A') : '-',
+        'Last Check-out': lastCheckOut ? moment(lastCheckOut).tz('Asia/Kolkata').format('DD MMM, hh:mm A') : '-',
+        'Attendance %': attendancePercent + '%'
+      });
+    }
+
+    // Sort by name
+    rows.sort((a, b) => a['Employee Name'].localeCompare(b['Employee Name']));
+
+    // Excel Workbook
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet(`Attendance - ${startDate.format('MMM YYYY')}`);
+
+    worksheet.columns = Object.keys(rows[0]).map(key => ({
+      header: key,
+      key,
+      width: ['Employee Name', 'Email', 'First Check-in', 'Last Check-out'].includes(key) ? 28 : 18
+    }));
+
+    worksheet.addRows(rows);
+
+    // Styling
+    const headerRow = worksheet.getRow(1);
+    headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E40AF' } };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+
+    worksheet.mergeCells('A1:' + String.fromCharCode(64 + worksheet.columns.length) + '1');
+    const titleCell = worksheet.getCell('A1');
+    titleCell.value = `Monthly Attendance Report - ${startDate.format('MMMM YYYY')}`;
+    titleCell.font = { bold: true, size: 18, color: { argb: 'FF1E40AF' } };
+    titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+
+    worksheet.spliceRows(2, 0, []);
+    worksheet.getRow(3).values = worksheet.columns.map(c => c.header);
+    worksheet.getRow(3).font = { bold: true };
+    worksheet.getRow(3).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3F4F6' } };
+
+    // Send file
+    const fileName = `Attendance_Report_${selectedMonth}_${selectedYear}.${format === 'csv' ? 'csv' : 'xlsx'}`;
+    res.setHeader('Content-Type', format === 'csv'
+      ? 'text/csv'
+      : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+    if (format === 'csv') {
+      await workbook.csv.write(res);
+    } else {
+      await workbook.xlsx.write(res);
+    }
+    res.end();
+
+  } catch (error) {
+    console.error('Export Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
