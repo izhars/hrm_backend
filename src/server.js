@@ -1,19 +1,22 @@
 require('dotenv').config();
-if (process.env.NODE_ENV !== 'production') {
-  require('dotenv').config();
-}
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
 const path = require('path');
 
+// Services & Utils
 const connectDB = require('./config/db');
 const errorHandler = require('./middleware/errorHandler');
 const cronJobs = require('./utils/cronJobs');
 const emailService = require('./utils/emailService');
+const createSuperAdmin = require('./seedAdmin');
+const { initChat } = require('./socket/chat');
 
+// Firebase Admin
+const admin = require('../src/firebase/firebase');
+
+// Routes
 const authRoutes = require('./routes/authRoutes');
 const employeeRoutes = require('./routes/employeeRoutes');
 const attendanceRoutes = require('./routes/attendanceRoutes');
@@ -38,12 +41,9 @@ const helpRoutes = require('./routes/helpRoutes');
 const ticketRoutes = require('./routes/ticketRoutes');
 const aboutRoutes = require('./routes/aboutRoutes');
 const emailRoutes = require('./routes/emailRoutes');
-const createSuperAdmin = require('./seedAdmin');
 const uploadRoutes = require('./routes/uploadRoutes');
 const taskRoutes = require('./routes/taskRoutes');
-const { initChat } = require('./socket/chat');
 const systemRoutes = require('./routes/systemRoutes');
-
 
 const app = express();
 const server = http.createServer(app);
@@ -64,13 +64,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static files (for CSS, JS, images)
+// Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
-
-// Serve uploaded files
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
-// Password Reset Page Route (before API routes)
+// Password Reset Page Route
 app.get('/reset-password/:token', (req, res) => {
   res.sendFile(path.join(__dirname, 'email', 'reset-password.html'));
 });
@@ -104,7 +102,6 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/system', systemRoutes);
 
-
 // 404 Handler
 app.use((req, res) => {
   res.status(404).json({ success: false, message: 'Route not found' });
@@ -115,7 +112,7 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 
-// Start Server after MongoDB connection
+// Start server after MongoDB connection
 connectDB()
   .then(async () => {
     console.log('✅ MongoDB connected successfully');
@@ -136,6 +133,14 @@ connectDB()
 
     // Initialize Socket.IO
     const io = initChat(server);
+
+    // Test Firebase Admin (optional)
+    try {
+      const bucket = admin.storage().bucket();
+      console.log(`✅ Firebase bucket initialized: ${bucket.name}`);
+    } catch (err) {
+      console.error('❌ Firebase initialization failed:', err.message);
+    }
 
     // Start server
     server.listen(PORT, () => {
