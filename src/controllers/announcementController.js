@@ -1,6 +1,7 @@
 const Announcement = require('../models/Announcement');
 const AppError = require('../utils/appError');
 const catchAsync = require('../utils/catchAsync'); // helper to catch async errors
+const { notifyAnnouncementToAudience } = require('../utils/announcementNotifications');
 
 // @desc    Get all announcements
 // @route   GET /api/announcements
@@ -61,7 +62,7 @@ exports.createAnnouncement = catchAsync(async (req, res, next) => {
 
   const announcement = await Announcement.create(announcementData);
   await announcement.populate('createdBy', 'firstName lastName email');
-
+  await notifyAnnouncementToAudience(announcement);
   res.status(201).json({
     success: true,
     message: 'Announcement created successfully',

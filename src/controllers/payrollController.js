@@ -2,103 +2,112 @@ const Payroll = require('../models/Payroll');
 const User = require('../models/User');
 const Attendance = require('../models/Attendance');
 
-// @desc    Generate payroll for employee
-// @route   POST /api/payroll/generate
-// @access  Private (HR, Admin)
+// Generate Payroll - with accurate proration
 exports.generatePayroll = async (req, res) => {
   try {
-    const { employeeId, month, year } = req.body;
-    
-    // Check if payroll already exists
-    const existingPayroll = await Payroll.findOne({
-      employee: employeeId,
+    const {
+      employeeId,
       month,
-      year
-    });
-    
-    if (existingPayroll) {
-      return res.status(400).json({
-        success: false,
-        message: 'Payroll already generated for this month'
-      });
+      year,
+      bonus = 0,
+      overtime = 0,
+      otherEarnings = 0,
+      insurance = 0,
+      advance = 0,
+      otherDeductions = 0,
+      pfRate = 0.12,
+      taxRate = 0.10
+    } = req.body;
+
+    if (!employeeId || !month || !year) {
+      return res.status(400).json({ success: false, message: 'employeeId, month, and year are required' });
     }
-    
-    // Get employee details
+
+    if (month < 1 || month > 12) {
+      return res.status(400).json({ success: false, message: 'Invalid month' });
+    }
+
+    const existing = await Payroll.findOne({ employee: employeeId, month, year });
+    if (existing) {
+      return res.status(400).json({ success: false, message: 'Payroll already exists for this period' });
+    }
+
     const employee = await User.findById(employeeId);
-    if (!employee) {
-      return res.status(404).json({
-        success: false,
-        message: 'Employee not found'
-      });
+    if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
+
+    const basic = employee.salary?.basic || 0;
+    const hra = employee.salary?.hra || 0;
+    const transport = employee.salary?.transport || 0;
+
+    if (basic === 0) {
+      return res.status(400).json({ success: false, message: 'Employee has no basic salary set' });
     }
-    
-    // Calculate attendance for the month
+
     const startDate = new Date(year, month - 1, 1);
     const endDate = new Date(year, month, 0, 23, 59, 59);
-    
+    const workDays = new Date(year, month, 0).getDate();
+
     const attendance = await Attendance.find({
       employee: employeeId,
       date: { $gte: startDate, $lte: endDate }
     });
-    
-    const workDays = new Date(year, month, 0).getDate(); // Total days in month
+
     const presentDays = attendance.filter(a => a.status === 'present').length;
-    const absentDays = attendance.filter(a => a.status === 'absent').length;
     const leaveDays = attendance.filter(a => a.status === 'on-leave').length;
     const halfDays = attendance.filter(a => a.status === 'half-day').length;
-    
-    // Calculate earnings
-    const basicSalary = employee.salary.basic || 0;
-    const hra = employee.salary.hra || 0;
-    const transport = employee.salary.transport || 0;
-    
-    // Calculate deductions (simplified calculation)
-    const pf = basicSalary * 0.12; // 12% PF
-    const tax = basicSalary * 0.10; // 10% tax (simplified)
-    
-    // Create payroll
+    const absentDays = attendance.filter(a => a.status === 'absent').length;
+
+    // Change policy here: include/exclude leaveDays
+    const payableDays = presentDays + leaveDays + (halfDays * 0.5); // Leaves are PAID
+
+    const dailyBasic = basic / workDays;
+    const dailyHra = hra / workDays;
+    const dailyTransport = transport / workDays;
+
+    const earnedBasic = dailyBasic * payableDays;
+    const earnedHra = dailyHra * payableDays;
+    const earnedTransport = dailyTransport * payableDays;
+
+    const pf = earnedBasic * pfRate;
+    const tax = earnedBasic * taxRate;
+
     const payroll = await Payroll.create({
       employee: employeeId,
       month,
       year,
       earnings: {
-        basicSalary,
-        hra,
-        transport,
-        bonus: 0,
-        overtime: 0,
-        other: 0
+        basicSalary: Math.round(earnedBasic * 100) / 100,
+        hra: Math.round(earnedHra * 100) / 100,
+        transport: Math.round(earnedTransport * 100) / 100,
+        bonus,
+        overtime,
+        other: otherEarnings
       },
       deductions: {
-        pf,
-        tax,
-        insurance: 0,
-        advance: 0,
-        other: 0
+        pf: Math.round(pf * 100) / 100,
+        tax: Math.round(tax * 100) / 100,
+        insurance,
+        advance,
+        other: otherDeductions
       },
-      attendance: {
-        workDays,
-        presentDays,
-        absentDays,
-        leaveDays,
-        halfDays
-      },
+      attendance: { workDays, presentDays, absentDays, leaveDays, halfDays },
       generatedBy: req.user.id,
       status: 'draft'
     });
-    
-    await payroll.populate('employee', 'firstName lastName employeeId email');
-    
+
+    await payroll.populate([
+      { path: 'employee', select: 'firstName lastName employeeId email department' },
+      { path: 'generatedBy', select: 'firstName lastName' }
+    ]);
+
     res.status(201).json({
       success: true,
       message: 'Payroll generated successfully',
       payroll
     });
+
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 

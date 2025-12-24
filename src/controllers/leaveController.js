@@ -1,4 +1,3 @@
-// controllers/leaveController.js
 const Leave = require('../models/Leave');
 const User = require('../models/User');
 const Attendance = require('../models/Attendance');
@@ -16,6 +15,123 @@ const canActOnLeave = async (currentUser, leaveEmployeeId) => {
     return employee && employee.reportingManager?.toString() === currentUser.id;
   }
   return false;
+};
+
+// ====================================
+// HELPER: Send role-based notifications
+// ====================================
+const sendRoleBasedNotification = async (data) => {
+  const {
+    title,
+    message,
+    type = 'info',
+    targetRoles = [],
+    targetUsers = [],
+    meta = {},
+    createdBy
+  } = data;
+
+  let notifications = [];
+
+  // Add individual user notifications
+  if (Array.isArray(targetUsers) && targetUsers.length > 0) {
+    // Get user roles for each target user
+    const users = await User.find({ _id: { $in: targetUsers } }).select('_id role');
+    
+    notifications.push(...users.map(user => ({
+      title,
+      message,
+      type,
+      user: user._id,
+      role: user.role, // Set the user's actual role instead of null
+      meta,
+      createdBy,
+      createdAt: new Date()
+    })));
+  }
+
+  // Add role-based notifications
+  if (Array.isArray(targetRoles) && targetRoles.length > 0) {
+    for (const role of targetRoles) {
+      if (role === 'all') {
+        // Send to all active users
+        const users = await User.find({ isActive: true }).select('_id role');
+        notifications.push(...users.map(u => ({
+          title,
+          message,
+          type,
+          user: u._id,
+          role: u.role, // User's actual role
+          isGlobal: true, // Flag for global notifications
+          meta,
+          createdBy,
+          createdAt: new Date()
+        })));
+      } else {
+        // Send to specific role
+        const users = await User.find({ role, isActive: true }).select('_id role');
+        notifications.push(...users.map(u => ({
+          title,
+          message,
+          type,
+          user: u._id,
+          role: u.role,
+          meta,
+          createdBy,
+          createdAt: new Date()
+        })));
+      }
+    }
+  }
+
+  if (notifications.length > 0) {
+    await Notification.insertMany(notifications);
+    
+    // Emit socket events if needed
+    // if (global.io) {
+    //   notifications.forEach(n => {
+    //     global.io.to(n.user?.toString()).emit('notification:new', n);
+    //   });
+    // }
+  }
+};
+
+// ====================================
+// HELPER: Get target roles for leave notifications
+// ====================================
+const getNotificationTargetsForLeave = (userRole, actionType) => {
+  const targets = {
+    // When employee applies for leave
+    'leave:apply': {
+      superadmin: ['hr', 'superadmin'], // Superadmin notifies HR (can add superadmin if needed)
+      hr: ['hr'], // HR notifies other HRs
+      manager: ['hr', 'manager'], // Manager notifies HR and managers
+      employee: ['hr', 'manager'] // Employee notifies HR and their manager
+    },
+    // When leave is approved
+    'leave:approved': {
+      superadmin: [], // Usually just notify the applicant
+      hr: [], // Usually just notify the applicant
+      manager: [], // Usually just notify the applicant
+      employee: [] // N/A
+    },
+    // When leave is rejected
+    'leave:rejected': {
+      superadmin: [], // Usually just notify the applicant
+      hr: [], // Usually just notify the applicant
+      manager: [], // Usually just notify the applicant
+      employee: [] // N/A
+    },
+    // When leave is cancelled
+    'leave:cancelled': {
+      superadmin: ['hr'], // Notify HR
+      hr: ['hr'], // Notify other HRs
+      manager: ['hr', 'manager'], // Notify HR and managers
+      employee: ['hr', 'manager'] // Notify HR and manager
+    }
+  };
+
+  return targets[actionType]?.[userRole] || [];
 };
 
 // ================================
@@ -174,7 +290,7 @@ exports.applyLeave = async (req, res) => {
         leaveDuration,
         halfDayType,
         leaveType,
-        holidayDates // pass holidays to skip
+        holidayDates
       );
     } catch (err) {
       return res.status(400).json({ success: false, message: err.message });
@@ -201,20 +317,57 @@ exports.applyLeave = async (req, res) => {
       documents: documents || []
     });
 
-    await leave.populate('employee', 'firstName lastName employeeId email');
+    await leave.populate('employee', 'firstName lastName employeeId email role department reportingManager');
 
-    // === Send notification to HR/Admin ===
-    await Notification.create({
+    // === Get HR users for notification ===
+    const hrUsers = await User.find({ role: 'hr', isActive: true }).select('_id');
+    
+    // === Get manager if employee has one ===
+    let managerUsers = [];
+    if (user.reportingManager) {
+      const manager = await User.findById(user.reportingManager).select('_id');
+      if (manager) managerUsers.push(manager._id);
+    }
+
+    // === Send role-based notifications ===
+    // 1. Notify HR
+    await sendRoleBasedNotification({
       title: 'New Leave Application',
-      message: `${leave.employee.firstName} ${leave.employee.lastName} has applied for ${leave.leaveType} leave from ${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}.`,
+      message: `${leave.employee.firstName} ${leave.employee.lastName} (${leave.employee.employeeId}) has applied for ${leave.leaveType} leave from ${leave.startDate.toDateString()} to ${leave.endDate.toDateString()} (${leave.totalDays} days).`,
       type: 'info',
-      role: 'hr',
-      meta: { leaveId: leave._id, applicantId: req.user.id },
+      targetRoles: ['hr'],
+      targetUsers: managerUsers, // Also notify manager
+      meta: { 
+        leaveId: leave._id, 
+        applicantId: req.user.id,
+        applicantName: `${leave.employee.firstName} ${leave.employee.lastName}`,
+        leaveType: leave.leaveType,
+        startDate: leave.startDate,
+        endDate: leave.endDate,
+        totalDays: leave.totalDays
+      },
+      createdBy: req.user._id
+    });
+
+    // 2. Notify the employee that their leave was submitted
+    await sendRoleBasedNotification({
+      title: 'Leave Application Submitted',
+      message: `Your ${leave.leaveType} leave application for ${leave.startDate.toDateString()} to ${leave.endDate.toDateString()} has been submitted successfully.`,
+      type: 'success',
+      targetUsers: [req.user.id],
+      meta: { 
+        leaveId: leave._id,
+        status: 'pending',
+        leaveType: leave.leaveType,
+        startDate: leave.startDate,
+        endDate: leave.endDate
+      },
+      createdBy: req.user._id
     });
 
     res.status(201).json({
       success: true,
-      message: 'Leave applied successfully. Holidays were skipped in calculation. Notification sent to HR and Admin.',
+      message: 'Leave applied successfully. Holidays were skipped in calculation.',
       leave
     });
 
@@ -225,7 +378,297 @@ exports.applyLeave = async (req, res) => {
 };
 
 // ================================
-// 2. Get My Leaves
+// 5. Cancel Leave
+// ================================
+exports.cancelLeave = async (req, res) => {
+  try {
+    const leave = await Leave.findById(req.params.id)
+      .populate('employee', 'firstName lastName employeeId role reportingManager');
+    
+    if (!leave) return res.status(404).json({ success: false, message: 'Leave not found' });
+
+    const isEmployee = leave.employee._id.toString() === req.user.id;
+    const isManagerOrAbove = await canActOnLeave(req.user, leave.employee._id);
+
+    if (!isEmployee && !isManagerOrAbove) {
+      return res.status(403).json({ success: false, message: 'Not authorized to cancel this leave' });
+    }
+
+    if (isEmployee && !['pending', 'approved'].includes(leave.status)) {
+      return res.status(400).json({ success: false, message: 'You can only cancel pending or approved leaves' });
+    }
+
+    // ✅ Restore balance if approved
+    if (leave.status === 'approved' && leave.leaveType !== 'unpaid') {
+      await User.findByIdAndUpdate(
+        leave.employee._id,
+        { $inc: { [`leaveBalance.${leave.leaveType}`]: leave.totalDays } }
+      );
+    }
+
+    const oldStatus = leave.status;
+    leave.status = 'cancelled';
+    if (isManagerOrAbove) {
+      leave.cancelledBy = req.user.id;
+      leave.cancellationReason = req.body.cancellationReason || 'Cancelled by manager/HR';
+    } else {
+      leave.cancellationReason = req.body.cancellationReason || 'Cancelled by employee';
+    }
+
+    await leave.save();
+
+    // === Send role-based notifications ===
+    const actorName = isManagerOrAbove ? 
+      `${req.user.firstName} ${req.user.lastName} (${req.user.role})` : 
+      `${leave.employee.firstName} ${leave.employee.lastName}`;
+
+    // 1. Notify HR about cancellation
+    await sendRoleBasedNotification({
+      title: 'Leave Cancelled',
+      message: `${actorName} cancelled a ${leave.leaveType} leave application (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}). Previous status: ${oldStatus}`,
+      type: 'warning',
+      targetRoles: ['hr'],
+      meta: { 
+        leaveId: leave._id,
+        applicantId: leave.employee._id,
+        applicantName: `${leave.employee.firstName} ${leave.employee.lastName}`,
+        cancelledBy: req.user.id,
+        cancelledByName: actorName,
+        oldStatus,
+        leaveType: leave.leaveType,
+        cancellationReason: leave.cancellationReason
+      },
+      createdBy: req.user._id
+    });
+
+    // 2. Notify the employee (if cancelled by manager/HR)
+    if (isManagerOrAbove) {
+      await sendRoleBasedNotification({
+        title: 'Leave Cancelled by Manager/HR',
+        message: `Your ${leave.leaveType} leave application (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}) has been cancelled by ${req.user.firstName} ${req.user.lastName}. Reason: ${leave.cancellationReason}`,
+        type: 'warning',
+        targetUsers: [leave.employee._id],
+        meta: { 
+          leaveId: leave._id,
+          cancelledBy: req.user.id,
+          cancelledByName: `${req.user.firstName} ${req.user.lastName}`,
+          cancellationReason: leave.cancellationReason
+        },
+        createdBy: req.user._id
+      });
+    } else {
+      // 3. Notify employee's manager (if cancelled by employee)
+      const employee = await User.findById(leave.employee._id).select('reportingManager');
+      if (employee.reportingManager) {
+        await sendRoleBasedNotification({
+          title: 'Employee Leave Cancelled',
+          message: `${leave.employee.firstName} ${leave.employee.lastName} cancelled their ${leave.leaveType} leave application (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}).`,
+          type: 'info',
+          targetUsers: [employee.reportingManager],
+          meta: { 
+            leaveId: leave._id,
+            employeeId: leave.employee._id,
+            employeeName: `${leave.employee.firstName} ${leave.employee.lastName}`,
+            leaveType: leave.leaveType,
+            cancellationReason: leave.cancellationReason
+          },
+          createdBy: req.user._id
+        });
+      }
+    }
+
+    res.status(200).json({ success: true, message: 'Leave cancelled', leave });
+  } catch (error) {
+    console.error('Cancel Leave Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ================================
+// 7. Approve Leave
+// ================================
+exports.approveLeave = async (req, res) => {
+  try {
+    const leave = await Leave.findById(req.params.id)
+      .populate('employee', 'firstName lastName employeeId email role');
+    
+    if (!leave)
+      return res.status(404).json({ success: false, message: 'Leave not found' });
+
+    if (leave.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Leave already processed' });
+    }
+
+    const allowed = await canActOnLeave(req.user, leave.employee._id);
+    if (!allowed) {
+      return res.status(403).json({ success: false, message: 'Not authorized to approve this leave' });
+    }
+
+    const approver = await User.findById(req.user.id);
+
+    leave.status = 'approved';
+    leave.approvedBy = req.user.id;
+    leave.approvedAt = Date.now();
+    await leave.save();
+
+    // Deduct leave balance
+    if (leave.leaveType !== 'unpaid') {
+      if (leave.leaveType === 'combo') {
+        await User.findByIdAndUpdate(
+          leave.employee._id,
+          { $inc: { 'leaveBalance.combo': -leave.totalDays } }
+        );
+      } else {
+        await User.findByIdAndUpdate(
+          leave.employee._id,
+          { $inc: { [`leaveBalance.${leave.leaveType}`]: -leave.totalDays } }
+        );
+      }
+    }
+
+    // Mark attendance
+    const current = new Date(leave.startDate);
+    while (current <= leave.endDate) {
+      const attendanceData = {
+        employee: leave.employee._id,
+        date: new Date(current),
+        status: leave.leaveDuration === 'half'
+          ? (leave.halfDayType === 'first_half' ? 'half-day-first' : 'half-day-second')
+          : 'on-leave'
+      };
+
+      await Attendance.findOneAndUpdate(
+        { employee: leave.employee._id, date: new Date(current) },
+        attendanceData,
+        { upsert: true }
+      );
+
+      current.setDate(current.getDate() + 1);
+    }
+
+    // === Send role-based notifications ===
+    
+    // 1. Notify the employee
+    await sendRoleBasedNotification({
+      title: 'Leave Approved',
+      message: `Your ${leave.leaveType} leave application (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}) has been approved by ${approver.firstName} ${approver.lastName}.`,
+      type: 'success',
+      targetUsers: [leave.employee._id],
+      meta: { 
+        leaveId: leave._id,
+        approvedBy: req.user.id,
+        approvedByName: `${approver.firstName} ${approver.lastName}`,
+        leaveType: leave.leaveType,
+        startDate: leave.startDate,
+        endDate: leave.endDate,
+        totalDays: leave.totalDays
+      },
+      createdBy: req.user._id
+    });
+
+    // 2. Notify HR if approved by manager
+    if (req.user.role === 'manager') {
+      await sendRoleBasedNotification({
+        title: 'Leave Approved by Manager',
+        message: `${approver.firstName} ${approver.lastName} (Manager) approved ${leave.employee.firstName} ${leave.employee.lastName}'s ${leave.leaveType} leave (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}).`,
+        type: 'info',
+        targetRoles: ['hr'],
+        meta: { 
+          leaveId: leave._id,
+          employeeId: leave.employee._id,
+          employeeName: `${leave.employee.firstName} ${leave.employee.lastName}`,
+          approvedBy: req.user.id,
+          approvedByName: `${approver.firstName} ${approver.lastName}`,
+          leaveType: leave.leaveType
+        },
+        createdBy: req.user._id
+      });
+    }
+
+    res.status(200).json({ success: true, message: 'Leave approved', leave });
+
+  } catch (error) {
+    console.error('Approve Leave Error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ================================
+// 8. Reject Leave
+// ================================
+exports.rejectLeave = async (req, res) => {
+  try {
+    const { rejectionReason } = req.body;
+    const leave = await Leave.findById(req.params.id)
+      .populate('employee', 'firstName lastName employeeId email role');
+    
+    if (!leave) return res.status(404).json({ success: false, message: 'Leave not found' });
+
+    if (leave.status !== 'pending') {
+      return res.status(400).json({ success: false, message: 'Leave already processed' });
+    }
+
+    const allowed = await canActOnLeave(req.user, leave.employee._id);
+    if (!allowed) {
+      return res.status(403).json({ success: false, message: 'Not authorized to reject this leave' });
+    }
+
+    const rejecter = await User.findById(req.user.id);
+
+    leave.status = 'rejected';
+    leave.approvedBy = req.user.id;
+    leave.approvedAt = Date.now();
+    leave.rejectionReason = rejectionReason || 'No reason provided';
+    await leave.save();
+
+    // === Send role-based notifications ===
+
+    // 1. Notify the employee
+    await sendRoleBasedNotification({
+      title: 'Leave Rejected',
+      message: `Your ${leave.leaveType} leave application (${leave.startDate.toDateString()} to ${leave.endDate.toDateString()}) has been rejected by ${rejecter.firstName} ${rejecter.lastName}. Reason: ${leave.rejectionReason}`,
+      type: 'error',
+      targetUsers: [leave.employee._id],
+      meta: { 
+        leaveId: leave._id,
+        rejectedBy: req.user.id,
+        rejectedByName: `${rejecter.firstName} ${rejecter.lastName}`,
+        rejectionReason: leave.rejectionReason,
+        leaveType: leave.leaveType,
+        startDate: leave.startDate,
+        endDate: leave.endDate
+      },
+      createdBy: req.user._id
+    });
+
+    // 2. Notify HR if rejected by manager
+    if (req.user.role === 'manager') {
+      await sendRoleBasedNotification({
+        title: 'Leave Rejected by Manager',
+        message: `${rejecter.firstName} ${rejecter.lastName} (Manager) rejected ${leave.employee.firstName} ${leave.employee.lastName}'s ${leave.leaveType} leave. Reason: ${leave.rejectionReason}`,
+        type: 'info',
+        targetRoles: ['hr'],
+        meta: { 
+          leaveId: leave._id,
+          employeeId: leave.employee._id,
+          employeeName: `${leave.employee.firstName} ${leave.employee.lastName}`,
+          rejectedBy: req.user.id,
+          rejectedByName: `${rejecter.firstName} ${rejecter.lastName}`,
+          rejectionReason: leave.rejectionReason,
+          leaveType: leave.leaveType
+        },
+        createdBy: req.user._id
+      });
+    }
+
+    res.status(200).json({ success: true, message: 'Leave rejected', leave });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ================================
+// 2. Get My Leaves (remains the same)
 // ================================
 exports.getMyLeaves = async (req, res) => {
   try {
@@ -254,7 +697,7 @@ exports.getMyLeaves = async (req, res) => {
 };
 
 // ================================
-// 3. Get Single Leave
+// 3. Get Single Leave (remains the same)
 // ================================
 exports.getLeave = async (req, res) => {
   try {
@@ -281,7 +724,7 @@ exports.getLeave = async (req, res) => {
 };
 
 // ================================
-// 4. Get Leave Balance
+// 4. Get Leave Balance (remains the same)
 // ================================
 exports.getLeaveBalance = async (req, res) => {
   try {
@@ -293,49 +736,7 @@ exports.getLeaveBalance = async (req, res) => {
 };
 
 // ================================
-// 5. Cancel Leave
-// ================================
-exports.cancelLeave = async (req, res) => {
-  try {
-    const leave = await Leave.findById(req.params.id);
-    if (!leave) return res.status(404).json({ success: false, message: 'Leave not found' });
-
-    const isEmployee = leave.employee.toString() === req.user.id;
-    const isManagerOrAbove = await canActOnLeave(req.user, leave.employee);
-
-    if (!isEmployee && !isManagerOrAbove) {
-      return res.status(403).json({ success: false, message: 'Not authorized to cancel this leave' });
-    }
-
-    if (isEmployee && !['pending', 'approved'].includes(leave.status)) {
-      return res.status(400).json({ success: false, message: 'You can only cancel pending or approved leaves' });
-    }
-
-    // ✅ Restore balance if approved
-    if (leave.status === 'approved' && leave.leaveType !== 'unpaid') {
-      await User.findByIdAndUpdate(
-        leave.employee,
-        { $inc: { [`leaveBalance.${leave.leaveType}`]: leave.totalDays } }
-      );
-    }
-
-    leave.status = 'cancelled';
-    if (isManagerOrAbove) {
-      leave.cancelledBy = req.user.id;
-      leave.cancellationReason = req.body.cancellationReason || 'Cancelled by manager/HR';
-    }
-
-    await leave.save();
-
-    res.status(200).json({ success: true, message: 'Leave cancelled', leave });
-  } catch (error) {
-    console.error('Cancel Leave Error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// ================================
-// 6. Get Pending Leaves (Manager/HR)
+// 6. Get Pending Leaves (Manager/HR) (remains the same)
 // ================================
 exports.getPendingLeaves = async (req, res) => {
   try {
@@ -364,107 +765,7 @@ exports.getPendingLeaves = async (req, res) => {
 };
 
 // ================================
-// 7. Approve Leave
-// ================================
-exports.approveLeave = async (req, res) => {
-  try {
-    const leave = await Leave.findById(req.params.id);
-    if (!leave)
-      return res.status(404).json({ success: false, message: 'Leave not found' });
-
-    if (leave.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'Leave already processed' });
-    }
-
-    const allowed = await canActOnLeave(req.user, leave.employee);
-    if (!allowed) {
-      return res.status(403).json({ success: false, message: 'Not authorized to approve this leave' });
-    }
-
-    leave.status = 'approved';
-    leave.approvedBy = req.user.id;
-    leave.approvedAt = Date.now();
-    await leave.save();
-
-    // ✅ Deduct balance
-    if (leave.leaveType !== 'unpaid') {
-      if (leave.leaveType === 'combo') {
-        // Deduct from combo balance
-        await User.findByIdAndUpdate(
-          leave.employee,
-          { $inc: { 'leaveBalance.combo': -leave.totalDays } }
-        );
-      } else {
-        // Deduct from regular leave balance
-        await User.findByIdAndUpdate(
-          leave.employee,
-          { $inc: { [`leaveBalance.${leave.leaveType}`]: -leave.totalDays } }
-        );
-      }
-    }
-
-    // ✅ Mark attendance
-    const current = new Date(leave.startDate);
-    while (current <= leave.endDate) {
-      const attendanceData = {
-        employee: leave.employee,
-        date: new Date(current),
-        status: leave.leaveDuration === 'half'
-          ? (leave.halfDayType === 'first_half' ? 'half-day-first' : 'half-day-second')
-          : 'on-leave'
-      };
-
-      await Attendance.findOneAndUpdate(
-        { employee: leave.employee, date: new Date(current) },
-        attendanceData,
-        { upsert: true }
-      );
-
-      current.setDate(current.getDate() + 1);
-    }
-
-    await leave.populate('employee approvedBy');
-    res.status(200).json({ success: true, message: 'Leave approved', leave });
-  } catch (error) {
-    console.error('Approve Leave Error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-
-// ================================
-// 8. Reject Leave
-// ================================
-exports.rejectLeave = async (req, res) => {
-  try {
-    const { rejectionReason } = req.body;
-    const leave = await Leave.findById(req.params.id);
-    if (!leave) return res.status(404).json({ success: false, message: 'Leave not found' });
-
-    if (leave.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'Leave already processed' });
-    }
-
-    const allowed = await canActOnLeave(req.user, leave.employee);
-    if (!allowed) {
-      return res.status(403).json({ success: false, message: 'Not authorized to reject this leave' });
-    }
-
-    leave.status = 'rejected';
-    leave.approvedBy = req.user.id;
-    leave.approvedAt = Date.now();
-    leave.rejectionReason = rejectionReason || 'No reason provided';
-    await leave.save();
-
-    await leave.populate('employee approvedBy');
-    res.status(200).json({ success: true, message: 'Leave rejected', leave });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// ================================
-// 9. Get All Leaves (HR/Manager)
+// 9. Get All Leaves (HR/Manager) (remains the same)
 // ================================
 exports.getAllLeaves = async (req, res) => {
   try {
@@ -497,7 +798,6 @@ exports.getAllLeaves = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
 
 // ---------------------------------------------------
 // Helper: count *working* days (skip Sat/Sun + holidays)

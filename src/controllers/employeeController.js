@@ -88,6 +88,9 @@ exports.getEmployeeLastSeen = async (req, res) => {
   }
 };
 
+// @desc    Get all HR employees
+// @route   GET /api/employees/hr
+// @access  Private (HR, Manager, Admin)
 exports.getAllHRs = async (req, res) => {
   try {
     const { 
@@ -96,6 +99,7 @@ exports.getAllHRs = async (req, res) => {
       search, 
       department, 
       isActive,
+      isAvailable, // ✅ NEW: Filter by availability
       sortBy = 'createdAt',
       order = 'desc'
     } = req.query;
@@ -114,10 +118,23 @@ exports.getAllHRs = async (req, res) => {
 
     if (department) query.department = department;
     if (isActive !== undefined) query.isActive = isActive === 'true';
+    
+    // ✅ NEW: Filter by availability
+    if (isAvailable !== undefined) {
+      query.isAvailable = isAvailable === 'true';
+    }
 
-    // Sorting logic
+    // Sorting logic - default by availability status
     const sort = {};
-    sort[sortBy] = order === 'asc' ? 1 : -1;
+    
+    // If sortBy is availability-related, handle specially
+    if (sortBy === 'isAvailable' || sortBy === 'nextAvailableAt') {
+      sort[sortBy] = order === 'asc' ? 1 : -1;
+      // Secondary sort by name for better organization
+      sort.firstName = 1;
+    } else {
+      sort[sortBy] = order === 'asc' ? 1 : -1;
+    }
 
     // Fetch HRs
     const hrs = await User.find(query)
@@ -126,10 +143,16 @@ exports.getAllHRs = async (req, res) => {
       .sort(sort)
       .limit(Number(limit))
       .skip((page - 1) * limit)
-      .select('-password');
+      .select('-password')
+      .select('+availabilityStatus +nextAvailableAt +availabilityLastChanged'); // Include availability fields
 
     // Count total
     const count = await User.countDocuments(query);
+    
+    // ✅ Calculate availability statistics
+    const allHRs = await User.find({ role: 'hr', isActive: true });
+    const availableHRs = allHRs.filter(hr => hr.isAvailable).length;
+    const unavailableHRs = allHRs.filter(hr => !hr.isAvailable).length;
 
     res.status(200).json({
       success: true,
@@ -137,7 +160,32 @@ exports.getAllHRs = async (req, res) => {
       totalPages: Math.ceil(count / limit),
       currentPage: Number(page),
       totalHRs: count,
-      hrs
+      availabilityStats: {
+        total: allHRs.length,
+        available: availableHRs,
+        unavailable: unavailableHRs,
+        availabilityRate: allHRs.length > 0 ? Math.round((availableHRs / allHRs.length) * 100) : 0
+      },
+      hrs: hrs.map(hr => ({
+        id: hr._id,
+        firstName: hr.firstName,
+        lastName: hr.lastName,
+        email: hr.email,
+        employeeId: hr.employeeId,
+        profilePicture: hr.profilePicture,
+        designation: hr.designation,
+        department: hr.department,
+        isActive: hr.isActive,
+        // ✅ Include availability information
+        isAvailable: hr.isAvailable,
+        availabilityStatus: hr.availabilityStatus,
+        nextAvailableAt: hr.nextAvailableAt,
+        availabilityLastChanged: hr.availabilityLastChanged,
+        // Additional useful info
+        phone: hr.phone,
+        location: hr.location,
+        joiningDate: hr.joiningDate
+      }))
     });
   } catch (error) {
     res.status(500).json({ 
@@ -397,5 +445,158 @@ exports.updateProfilePicture = async (req, res) => {
       success: false, 
       message: error.message 
     });
+  }
+};
+
+
+// @desc    Toggle HR availability
+// @route   PUT /api/employees/:id/availability
+// @access  Private (HR themselves, Admin)
+exports.toggleHRAvailability = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isAvailable, availabilityStatus, nextAvailableAt } = req.body;
+    
+    // Find the employee
+    const employee = await User.findById(id);
+    
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: 'Employee not found'
+      });
+    }
+    
+    // Check if user is HR
+    if (employee.role !== 'hr') {
+      return res.status(400).json({
+        success: false,
+        message: 'This endpoint is only for HR staff'
+      });
+    }
+    
+    // Check authorization - HR can update their own status, admin can update any HR
+    if (req.user.role !== 'superadmin' && req.user.id !== id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this HR availability'
+      });
+    }
+    
+    // Prepare update data
+    const updateData = {};
+    
+    // Handle isAvailable flag
+    if (isAvailable !== undefined) {
+      updateData.isAvailable = isAvailable;
+    }
+    
+    // Handle availability status message
+    if (availabilityStatus !== undefined) {
+      updateData.availabilityStatus = availabilityStatus;
+    }
+    
+    // Handle next available time
+    if (nextAvailableAt !== undefined) {
+      updateData.nextAvailableAt = nextAvailableAt;
+    }
+    
+    // If setting to unavailable without nextAvailableAt, set to 1 hour from now
+    if (isAvailable === false && !nextAvailableAt) {
+      const oneHourLater = new Date();
+      oneHourLater.setHours(oneHourLater.getHours() + 1);
+      updateData.nextAvailableAt = oneHourLater;
+    }
+    
+    // If setting to available, clear nextAvailableAt
+    if (isAvailable === true) {
+      updateData.nextAvailableAt = null;
+      if (!availabilityStatus) {
+        updateData.availabilityStatus = 'Available';
+      }
+    }
+    
+    // Update availability last changed timestamp
+    updateData.availabilityLastChanged = Date.now();
+    
+    // Apply the updates
+    const updatedEmployee = await User.findByIdAndUpdate(
+      id,
+      updateData,
+      { new: true, runValidators: true }
+    ).select('-password');
+    
+    // Log the availability change
+    await User.findByIdAndUpdate(id, {
+      $push: {
+        availabilityLogs: {
+          isAvailable: updatedEmployee.isAvailable,
+          status: updatedEmployee.availabilityStatus,
+          changedBy: req.user.id,
+          changedAt: new Date()
+        }
+      }
+    });
+    
+    res.status(200).json({
+      success: true,
+      message: 'HR availability updated successfully',
+      data: {
+        id: updatedEmployee._id,
+        name: `${updatedEmployee.firstName} ${updatedEmployee.lastName}`,
+        isAvailable: updatedEmployee.isAvailable,
+        availabilityStatus: updatedEmployee.availabilityStatus,
+        nextAvailableAt: updatedEmployee.nextAvailableAt,
+        availabilityLastChanged: updatedEmployee.availabilityLastChanged
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error updating HR availability:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+};
+
+// @desc    Get HR availability status
+// @route   GET /api/employees/:id/availability-status
+// @access  Private
+exports.getAvailabilityStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const hr = await User.findById(id).select(
+      "firstName lastName isAvailable availabilityStatus nextAvailableAt availabilityLastChanged role"
+    );
+
+    if (!hr) {
+      return res.status(404).json({
+        success: false,
+        message: "Employee not found"
+      });
+    }
+
+    if (hr.role !== "hr") {
+      return res.status(400).json({
+        success: false,
+        message: "This feature is only for HR"
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      hrId: hr._id,
+      name: `${hr.firstName} ${hr.lastName}`,
+      isAvailable: hr.isAvailable,
+      availabilityStatus: hr.availabilityStatus,
+      nextAvailableAt: hr.nextAvailableAt,
+      lastUpdated: hr.availabilityLastChanged
+    });
+
+  } catch (error) {
+    console.error("Error fetching availability:", error);
+    res.status(500).json({ success: false, message: "Server error" });
   }
 };

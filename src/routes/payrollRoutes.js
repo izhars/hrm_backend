@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
+
 const {
   generatePayroll,
   getAllPayrolls,
@@ -10,33 +11,30 @@ const {
   markAsPaid
 } = require('../controllers/payrollController');
 
-router.use(protect);
+router.use(protect); // All routes below require login
 
-router.post('/generate', 
-  authorize('hr', 'superadmin'), 
-  generatePayroll
-);
+router
+  .route('/generate')
+  .post(authorize('hr', 'superadmin'), generatePayroll);
 
-router.get('/', 
-  authorize('hr', 'superadmin'), 
-  getAllPayrolls
-);
+router
+  .route('/')
+  .get(authorize('hr', 'superadmin'), getAllPayrolls);
 
-router.get('/my-payroll', getMyPayroll);
+router
+  .route('/my-payroll')
+  .get(getMyPayroll);
 
-router.put('/:id', 
-  authorize('hr', 'superadmin'), 
-  updatePayroll
-);
+router
+  .route('/:id')
+  .put(authorize('hr', 'superadmin'), updatePayroll);
 
-router.put('/:id/process', 
-  authorize('hr', 'superadmin'), 
-  processPayroll
-);
+router
+  .route('/:id/process')
+  .put(authorize('hr', 'superadmin'), processPayroll);
 
-router.put('/:id/pay', 
-  authorize('hr', 'superadmin'), 
-  markAsPaid
-);
+router
+  .route('/:id/pay')
+  .put(authorize('hr', 'superadmin'), markAsPaid);
 
 module.exports = router;

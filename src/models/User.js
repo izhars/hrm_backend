@@ -34,6 +34,12 @@ const userSchema = new mongoose.Schema(
     lastSeen: { type: Date, default: null },
     lastLogin: { type: Date },
 
+    // 🔔 Firebase Cloud Messaging
+    fcmToken: {
+      type: String,
+      default: null,
+    },
+
     // Role & Hierarchy
     role: {
       type: String,
@@ -194,7 +200,43 @@ const userSchema = new mongoose.Schema(
 
     // Password Reset
     resetPasswordToken: String,
-    resetPasswordExpire: Date
+    resetPasswordExpire: Date,
+    isAvailable: {
+      type: Boolean,
+      default: true,
+      required: function () {
+        return this.role === 'hr';
+      }
+    },
+    availabilityStatus: {
+      type: String,
+      default: 'Available',
+      trim: true,
+      required: function () {
+        return this.role === 'hr';
+      }
+    },
+    nextAvailableAt: {
+      type: Date,
+      default: null
+    },
+    availabilityLastChanged: {
+      type: Date,
+      default: Date.now
+    },
+    availabilityLogs: [{
+      isAvailable: Boolean,
+      status: String,
+      changedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+      },
+      changedAt: {
+        type: Date,
+        default: Date.now
+      },
+      _id: false
+    }],
   },
   {
     timestamps: true,
@@ -330,8 +372,8 @@ userSchema.methods.getResetPasswordToken = function () {
   // Better random token without crypto
   const resetToken =
     (Math.random().toString(36).substring(2) +
-     Math.random().toString(36).substring(2) +
-     Date.now().toString(36));
+      Math.random().toString(36).substring(2) +
+      Date.now().toString(36));
 
   this.resetPasswordToken = resetToken;
 

@@ -586,26 +586,149 @@ exports.getTodayAttendance = async (req, res) => {
 // @access  Private (Manager, HR, Admin)
 exports.getEmployeeAttendance = async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
-    const query = { employee: req.params.employeeId };
+    const { startDate, endDate, month, year } = req.query;
+    const employeeId = req.params.employeeId;
 
-    if (startDate && endDate) {
-      query.date = {
-        $gte: moment.tz(startDate, 'Asia/Kolkata').startOf('day').toDate(),
-        $lte: moment.tz(endDate, 'Asia/Kolkata').endOf('day').toDate(),
-      };
+    // fetch employee details
+    const user = await User.findById(employeeId).select("firstName lastName fullName email employeeId weekendType dateOfJoining");
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Employee not found" });
     }
 
-    const attendance = await Attendance.find(query)
-      .sort({ date: -1 })
-      .populate('employee', 'firstName lastName employeeId email');
+    const weekendType = user.weekendType || "sunday";
+    const doj = moment(user.dateOfJoining).tz("Asia/Kolkata").startOf("day");
 
-    res.status(200).json({
-      success: true,
-      count: attendance.length,
-      attendance,
+    // date range
+    let start, end;
+    if (startDate && endDate) {
+      start = moment.tz(startDate, "Asia/Kolkata").startOf("day");
+      end = moment.tz(endDate, "Asia/Kolkata").endOf("day");
+    } else if (month && year) {
+      start = moment.tz({ year, month: month - 1, day: 1 }, "Asia/Kolkata").startOf("day");
+      end = moment(start).endOf("month");
+    } else {
+      start = moment.tz("Asia/Kolkata").startOf("month");
+      end = moment(start).endOf("month");
+    }
+
+    start = moment.max(start, doj);
+    const startUTC = start.clone().utc().toDate();
+    const endUTC = end.clone().utc().toDate();
+
+    // fetch all data
+    const [attendance, holidays, comboOffs] = await Promise.all([
+      Attendance.find({ employee: employeeId, date: { $gte: startUTC, $lte: endUTC } })
+        .sort({ date: -1 }).lean(),
+      Holiday.find({ date: { $gte: startUTC, $lte: endUTC }, isActive: true }).lean(),
+      ComboOff.find({ employee: employeeId, date: { $gte: startUTC, $lte: endUTC }, status: { $in: ["approved", "used", "earned"] } }).lean()
+    ]);
+
+    const attendanceMap = new Map(attendance.map(a => [moment(a.date).format("YYYY-MM-DD"), a]));
+    const holidayMap = new Map(holidays.map(h => [moment(h.date).format("YYYY-MM-DD"), h]));
+    const comboOffMap = new Map(comboOffs.map(c => [moment(c.date).format("YYYY-MM-DD"), c]));
+
+    const today = moment.tz("Asia/Kolkata").startOf("day");
+    const totalDays = [];
+    let current = start.clone();
+
+    while (current.isSameOrBefore(end, "day") && current.isSameOrBefore(today, "day")) {
+      const dateKey = current.format("YYYY-MM-DD");
+      const day = getISTDay(current);
+
+      const record = attendanceMap.get(dateKey);
+      const holiday = holidayMap.get(dateKey);
+      const comboOff = comboOffMap.get(dateKey);
+
+      let isWeekend = false;
+      if (weekendType === "sunday") isWeekend = day === 0;
+      else if (weekendType === "saturday_sunday") isWeekend = day === 0 || day === 6;
+
+      if (comboOff) {
+        totalDays.push({
+          date: current.toDate(),
+          status: "combo-off",
+          comboOffStatus: comboOff.status,
+          remarks: comboOff.remarks || null,
+          approvedBy: comboOff.approvedBy || null,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (holiday) {
+        totalDays.push({
+          date: current.toDate(),
+          status: "holiday",
+          holidayName: holiday.name,
+          holidayType: holiday.type,
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (isWeekend) {
+        totalDays.push({
+          date: current.toDate(),
+          status: "weekly-off",
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      } else if (record) {
+        const workHours = current.isSame(today, "day") ? getCurrentWorkHours(record) : record.workHours;
+        totalDays.push({
+          ...record,
+          workHours,
+          checkInTimeFormatted: record.checkIn?.time ? formatISTTime(record.checkIn.time) : null,
+          checkOutTimeFormatted: record.checkOut?.time ? formatISTTime(record.checkOut.time) : null,
+        });
+      } else {
+        totalDays.push({
+          date: current.toDate(),
+          status: "absent",
+          workHours: 0,
+          checkIn: { time: null },
+          checkOut: { time: null },
+          isLate: false,
+        });
+      }
+
+      current.add(1, "day");
+    }
+
+    // summary
+    const stats = {
+      totalDays: totalDays.length,
+      present: totalDays.filter(a => a.status === "present").length,
+      absent: totalDays.filter(a => a.status === "absent").length,
+      halfDay: totalDays.filter(a => a.status === "half-day").length,
+      onLeave: totalDays.filter(a => a.status === "on-leave").length,
+      holiday: totalDays.filter(a => a.status === "holiday").length,
+      weeklyOff: totalDays.filter(a => a.status === "weekly-off").length,
+      comboOff: totalDays.filter(a => a.status === "combo-off").length,
+      totalWorkHours: totalDays.reduce((s, a) => s + (a.workHours || 0), 0),
+      lateCount: totalDays.filter(a => a.isLate).length,
+    };
+
+    res.status(200).json({ 
+      success: true, 
+      count: totalDays.length, 
+      stats, 
+      attendance: totalDays,
+      employee: {
+        _id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        fullName: user.fullName || `${user.firstName} ${user.lastName}`,
+        email: user.email,
+        employeeId: user.employeeId,
+        weekendType: user.weekendType,
+        dateOfJoining: user.dateOfJoining
+      }
     });
   } catch (error) {
+    console.error("Attendance fetch error:", error);
     res.status(500).json({ success: false, message: error.message });
   }
 };

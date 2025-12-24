@@ -1,35 +1,68 @@
 const Badge = require('../models/Badge');
-const cloudinary = require('../config/cloudinary');
-const fs = require('fs');
-const path = require('path');
+const { uploadToCloudinary, deleteFromCloudinary } = require('../middleware/upload');
 
 // ✅ Create Badge (Upload to Cloudinary)
 exports.createBadge = async (req, res) => {
   try {
     const { name, description } = req.body;
 
+    console.log('Request body:', req.body);
+    console.log('Request file exists:', !!req.file);
+
     if (!req.file) {
-      return res.status(400).json({ success: false, message: 'Please upload a badge image' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Please upload a badge image' 
+      });
     }
 
-    // Upload to Cloudinary
-    const result = await cloudinary.uploader.upload(req.file.path, { folder: 'badges' });
+    // Log file details
+    console.log('File details:', {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      hasBuffer: !!req.file.buffer,
+      bufferLength: req.file.buffer ? req.file.buffer.length : 0
+    });
+
+    // Upload buffer to Cloudinary
+    let cloudinaryResult;
+    try {
+      cloudinaryResult = await uploadToCloudinary(req.file.buffer, {
+        folder: 'badges',
+        resource_type: 'image'
+      });
+      console.log('Cloudinary upload successful:', cloudinaryResult);
+    } catch (cloudinaryError) {
+      console.error('Cloudinary upload error:', cloudinaryError);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to upload image to Cloudinary',
+        error: cloudinaryError.message 
+      });
+    }
 
     // Save to DB
     const badge = await Badge.create({
       name,
       description,
-      imageUrl: result.secure_url,
-      cloudinaryId: result.public_id,
+      imageUrl: cloudinaryResult.url,
+      cloudinaryId: cloudinaryResult.publicId,
     });
 
-    // Delete local file after upload
-    fs.unlinkSync(req.file.path);
+    res.status(201).json({ 
+      success: true, 
+      message: 'Badge created successfully',
+      data: badge 
+    });
 
-    res.status(201).json({ success: true, data: badge });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server Error', error: err.message });
+    console.error('Create badge error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server Error', 
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 };
 
@@ -37,9 +70,18 @@ exports.createBadge = async (req, res) => {
 exports.getBadges = async (req, res) => {
   try {
     const badges = await Badge.find().sort({ createdAt: -1 });
-    res.json({ success: true, count: badges.length, data: badges });
+    res.json({ 
+      success: true, 
+      count: badges.length, 
+      data: badges 
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Server Error' });
+    console.error('Get badges error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch badges',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 };
 
@@ -47,16 +89,39 @@ exports.getBadges = async (req, res) => {
 exports.deleteBadge = async (req, res) => {
   try {
     const badge = await Badge.findById(req.params.id);
-    if (!badge) return res.status(404).json({ success: false, message: 'Badge not found' });
+    
+    if (!badge) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Badge not found' 
+      });
+    }
 
     // Delete image from Cloudinary
-    await cloudinary.uploader.destroy(badge.cloudinaryId);
+    if (badge.cloudinaryId) {
+      try {
+        await deleteFromCloudinary(badge.cloudinaryId);
+        console.log('Deleted from Cloudinary:', badge.cloudinaryId);
+      } catch (cloudinaryError) {
+        console.error('Failed to delete from Cloudinary:', cloudinaryError);
+        // Continue with DB deletion even if Cloudinary fails
+      }
+    }
 
     // Remove from DB
     await badge.deleteOne();
 
-    res.json({ success: true, message: 'Badge deleted successfully' });
+    res.json({ 
+      success: true, 
+      message: 'Badge deleted successfully' 
+    });
+
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Server Error' });
+    console.error('Delete badge error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to delete badge',
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
   }
 };

@@ -8,7 +8,6 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
-const mongoose = require('mongoose');
 
 const connectDB = require('./config/db');
 const errorHandler = require('./middleware/errorHandler');
@@ -40,8 +39,11 @@ const ticketRoutes = require('./routes/ticketRoutes');
 const aboutRoutes = require('./routes/aboutRoutes');
 const emailRoutes = require('./routes/emailRoutes');
 const createSuperAdmin = require('./seedAdmin');
-
+const uploadRoutes = require('./routes/uploadRoutes');
+const taskRoutes = require('./routes/taskRoutes');
 const { initChat } = require('./socket/chat');
+const systemRoutes = require('./routes/systemRoutes');
+
 
 const app = express();
 const server = http.createServer(app);
@@ -98,25 +100,10 @@ app.use('/api/help-topics', helpRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/about', aboutRoutes);
 app.use('/api/email', emailRoutes);
+app.use('/api/upload', uploadRoutes);
+app.use('/api/tasks', taskRoutes);
+app.use('/api/system', systemRoutes);
 
-// Health Check
-app.get('/api/health', (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: 'HRMS API is running fine',
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// Root Route
-app.get('/', (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: 'Welcome to HRMS API with Real-Time Chat & Email Service',
-    version: '1.0.0',
-    documentation: '/api/docs',
-  });
-});
 
 // 404 Handler
 app.use((req, res) => {

@@ -2,6 +2,7 @@ const Asset = require('../models/Asset');
 const User = require('../models/User');
 const AppError = require('../utils/appError');
 const catchAsync = require('../utils/catchAsync');
+const { notifyAssetAssigned, notifyAssetReturned, notifyAssetStatusChanged } = require('../utils/assetNotifications');
 
 // @desc    Get all assets
 // @route   GET /api/assets
@@ -78,7 +79,7 @@ exports.assignAsset = catchAsync(async (req, res, next) => {
   asset.status = 'assigned';
   await asset.save();
   await asset.populate('assignedTo', 'firstName lastName employeeId email');
-
+  await notifyAssetAssigned(asset.assignedTo._id, asset); // 🔥 One-liner
   res.status(200).json({ success: true, message: 'Asset assigned successfully', asset });
 });
 
@@ -99,12 +100,14 @@ exports.returnAsset = catchAsync(async (req, res, next) => {
     condition: condition || asset.condition,
     remarks
   });
+  await asset.save();
 
   asset.assignedTo = undefined;
   asset.assignedDate = undefined;
   asset.status = 'available';
   asset.condition = condition || asset.condition;
   await asset.save();
+  await notifyAssetReturned(asset.assignmentHistory.slice(-1)[0].employee, asset); // One-liner
 
   res.status(200).json({ success: true, message: 'Asset returned successfully', asset });
 });
@@ -151,6 +154,7 @@ exports.changeAssetStatus = catchAsync(async (req, res, next) => {
   if (remarks) asset.remarks = remarks;
 
   await asset.save();
+  if (asset.assignedTo) await notifyAssetStatusChanged(asset.assignedTo, asset); // Only if assigned
 
   res.status(200).json({
     success: true,

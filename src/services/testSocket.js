@@ -1,7 +1,7 @@
 const { io } = require("socket.io-client");
 
 const SOCKET_URL = "http://localhost:5000";
-const TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjY4ZjA4ODBkMWUwMTFiMzk2YzYwZTE4ZSIsInJvbGUiOiJociIsImVtcGxveWVlSWQiOiJTQ0FJUExIMDAxIiwiaWF0IjoxNzYxNzE4NDQwLCJleHAiOjE3NjQzMTA0NDB9.wIacAwFOnC9U6Pjz3JzLTF2FUgUk4nxtCVB6oRaMHC4"; // paste your generated token here
+const TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjY5MjY4YTRhYzE4N2Y3ZGJhMTQxMzhmYSIsInJvbGUiOiJociIsImVtcGxveWVlSWQiOiJTQ0FJUExIMDE5IiwiaWF0IjoxNzY1MzQyMzg3LCJleHAiOjE3Njc5MzQzODd9.fhnAv0nTsZorLQozCUaEEvw1MzI1UFwvi97CfDCTK0E"; // paste your generated token here
 
 console.log("🟡 Connecting to", SOCKET_URL);
 

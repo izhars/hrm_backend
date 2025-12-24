@@ -389,9 +389,12 @@ exports.resetDevice = async (req, res) => {
 // @access  Public
 exports.login = async (req, res) => {
   try {
-    const { email, password, deviceId } = req.body; // ✅ include deviceId
+    const { email, password, deviceId, fcmToken } = req.body;
+
+    console.log("🟦 Login Attempt:", { email, password, deviceId, fcmToken });
 
     if (!email || !password) {
+      console.log("🟨 Missing credentials");
       return res.status(400).json({
         success: false,
         message: 'Please provide email and password'
@@ -404,14 +407,18 @@ exports.login = async (req, res) => {
       .populate('reportingManager', 'firstName lastName email');
 
     if (!user) {
+      console.log("🔴 User not found:", email);
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
       });
     }
 
+    console.log("🟦 User found:", { userId: user._id, deviceId: user.deviceId });
+
     const isMatch = await user.matchPassword(password);
     if (!isMatch) {
+      console.log("🔴 Wrong password entered for:", email);
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
@@ -419,6 +426,7 @@ exports.login = async (req, res) => {
     }
 
     if (!user.isActive) {
+      console.log("🟥 Account inactive:", user._id);
       return res.status(403).json({
         success: false,
         message: 'Account is deactivated. Please contact HR.'
@@ -426,14 +434,19 @@ exports.login = async (req, res) => {
     }
 
     if (!user.isVerified) {
+      console.log("🟥 Account not verified:", user._id);
       return res.status(403).json({
         success: false,
         message: 'Account is not verified. Please verify your account before logging in.'
       });
     }
 
-    // Device check
+    // Device restriction logs
     if (user.deviceId && user.deviceId !== deviceId) {
+      console.log("🚫 Device Mismatch!", {
+        userDevice: user.deviceId,
+        incomingDevice: deviceId
+      });
       return res.status(403).json({
         success: false,
         message:
@@ -441,7 +454,6 @@ exports.login = async (req, res) => {
       });
     }
 
-    // Save device ID if not set
     if (!user.deviceId && deviceId) {
       user.deviceId = deviceId;
     }
@@ -449,8 +461,13 @@ exports.login = async (req, res) => {
     user.lastLogin = new Date();
     user.lastLoginDevice = deviceId || null;
 
-    await user.save({ validateBeforeSave: false });
+    // 🔔 FCM TOKEN SAVE
+    if (fcmToken) {
+      user.fcmToken = fcmToken;
+    }
 
+    await user.save({ validateBeforeSave: false });
+    console.log("🟢 Login successful:", { userId: user._id });
     const token = generateToken(user._id, user.role, user.employeeId);
 
     res.status(200).json({
@@ -474,15 +491,13 @@ exports.login = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('🔴 [Login Error]:', error);
+    console.error("🔥 [Login Error]:", error);
     res.status(500).json({
       success: false,
       message: 'Server error during login',
     });
   }
 };
-
-
 
 
 exports.getManagers = async (req, res) => {
@@ -767,10 +782,10 @@ exports.forgotPassword = async (req, res) => {
 
     try {
       // Send email
-      await emailService.sendEmail({ 
-        to: user.email, 
-        subject: 'HRMS Password Reset', 
-        html 
+      await emailService.sendEmail({
+        to: user.email,
+        subject: 'HRMS Password Reset',
+        html
       });
 
       res.status(200).json({
