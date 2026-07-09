@@ -1,509 +1,938 @@
-// socket/chat.js
 const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
 const Message = require('../models/Message');
 const User = require('../models/User');
-const { uploadToCloudinary, uploadBase64ToCloudinary } = require('../middleware/upload');
+const Conversation = require('../models/Conversation');
+const { uploadBase64ToCloudinary } = require('../middleware/upload');
+
+// Connection tracking for debugging
+const connectionLogs = new Map(); // socketId → connection info
+const userConnectionHistory = new Map(); // userId → [connectionHistory]
 
 // Maps for active users and typing states
 const activeUsers = new Map(); // userId → Set(socketIds)
 const socketToUser = new Map(); // socketId → userId
-const typingUsers = new Map(); // socketId → { targetUserId, timeout }
-
+const typingUsers = new Map(); // socketId → { target, type, timeout }
+const onlineUsers = new Map(); // userId → userInfo
 let ioInstance = null;
 
-const initChat = (server) => {
-    const io = new Server(server, {
-        cors: { origin: '*', methods: ['GET', 'POST'] },
-    });
+const initChat = (io) => {
     ioInstance = io;
 
-    // ✅ Authentication middleware
+    // Connection monitoring middleware
+    io.use((socket, next) => {
+        const connectionId = Date.now();
+        connectionLogs.set(socket.id, {
+            id: connectionId,
+            handshake: {
+                headers: socket.handshake.headers,
+                auth: { ...socket.handshake.auth, token: socket.handshake.auth?.token ? '***REDACTED***' : null },
+                time: socket.handshake.time,
+                address: socket.handshake.address,
+                xdomain: socket.handshake.xdomain,
+                secure: socket.handshake.secure,
+                url: socket.handshake.url
+            },
+            connectedAt: new Date(),
+            user: null,
+            events: []
+        });
+
+        console.log(`🔌 New chat socket connection attempt: ${socket.id}`, {
+            connectionId,
+            origin: socket.handshake.headers.origin,
+            userAgent: socket.handshake.headers['user-agent']
+        });
+
+        next();
+    });
+
+    // Authentication middleware
     io.use(async (socket, next) => {
-        const token = socket.handshake.auth?.token;
-        if (!token) return next(new Error('Authentication error: No token provided'));
+        const token = socket.handshake.auth?.token ||
+            socket.handshake.headers?.authorization?.replace('Bearer ', '');
+
+        const logEntry = connectionLogs.get(socket.id);
+        logEntry.events.push({
+            type: 'AUTH_START',
+            timestamp: new Date(),
+            tokenPresent: !!token
+        });
+
+        if (!token) {
+            logEntry.events.push({
+                type: 'AUTH_FAILED',
+                timestamp: new Date(),
+                reason: 'No token provided'
+            });
+            return next(new Error('Authentication error: No token provided'));
+        }
 
         try {
             const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            const user = await User.findById(decoded.id).select('firstName lastName role employeeId email');
-            if (!user) return next(new Error('Authentication error: User not found'));
+            const user = await User.findById(decoded.id)
+                .select('firstName lastName role employeeId email profilePicture department status isOnline lastSeen lastActive');
+
+            if (!user) {
+                logEntry.events.push({
+                    type: 'AUTH_FAILED',
+                    timestamp: new Date(),
+                    reason: 'User not found',
+                    userId: decoded.id
+                });
+                return next(new Error('Authentication error: User not found'));
+            }
 
             socket.user = {
                 id: user._id.toString(),
                 firstName: user.firstName,
                 lastName: user.lastName,
+                fullName: `${user.firstName} ${user.lastName}`.trim(),
                 role: user.role,
                 employeeId: user.employeeId,
                 email: user.email,
+                avatar: user.profilePicture?.url || '/default-avatar.png',
+                department: user.department,
+                status: user.status || 'active',
+                isOnline: user.isOnline || false,
+                lastSeen: user.lastSeen,
+                lastActive: user.lastActive
             };
+
+            logEntry.user = { ...socket.user, id: socket.user.id };
+            logEntry.events.push({
+                type: 'AUTH_SUCCESS',
+                timestamp: new Date(),
+                userId: socket.user.id,
+                userEmail: socket.user.email
+            });
+
             next();
         } catch (err) {
+            logEntry.events.push({
+                type: 'AUTH_ERROR',
+                timestamp: new Date(),
+                error: err.message,
+                stack: err.stack
+            });
             console.error('❌ Socket auth error:', err.message);
-            next(new Error('Authentication error'));
+            next(new Error('Authentication error: ' + err.message));
         }
     });
 
     io.on('connection', (socket) => {
-        const { id, firstName, lastName, role } = socket.user;
-        const name = `${firstName} ${lastName}`.trim();
+        const { id, firstName, lastName, role, fullName, avatar, email } = socket.user;
         const userId = id.toString();
 
-        console.log('⚡ Socket connected');
-        console.log('   👤 User:', { userId, name, role });
-        console.log('   🔌 Socket ID:', socket.id);
+        const logEntry = connectionLogs.get(socket.id);
+        logEntry.events.push({
+            type: 'CONNECTION_ESTABLISHED',
+            timestamp: new Date(),
+            userId,
+            fullName
+        });
 
-        // 🔑 Join role room
-        socket.join(role);
-        console.log(`   🏠 Joined room: ${role}`);
+        console.log(`✅ User connected: ${fullName} (${role})`, {
+            socketId: socket.id,
+            userId,
+            email,
+            connectionsCount: io.engine.clientsCount
+        });
+
+        // Store connection history
+        if (!userConnectionHistory.has(userId)) {
+            userConnectionHistory.set(userId, []);
+        }
+
+        userConnectionHistory.get(userId).push({
+            socketId: socket.id,
+            connectedAt: new Date(),
+            userAgent: socket.handshake.headers['user-agent'],
+            ip: socket.handshake.address
+        });
 
         // Track active users
-        if (!activeUsers.has(userId)) activeUsers.set(userId, new Set());
+        if (!activeUsers.has(userId)) {
+            activeUsers.set(userId, new Set());
+        }
         activeUsers.get(userId).add(socket.id);
         socketToUser.set(socket.id, userId);
 
-        console.log(
-            `   📊 Active sockets for user ${userId}:`,
-            activeUsers.get(userId).size
-        );
-
-        // Update last seen
-        User.findByIdAndUpdate(userId, { lastSeen: new Date() }).catch(console.error);
-
-        const opposite = role === 'hr' ? 'employee' : 'hr';
-
-        // 🚀 Emit online ONLY on first connection
-        if (activeUsers.get(userId).size === 1) {
-            console.log(
-                `📢 EMIT user-online → room: ${opposite}`,
-                { id: userId, name, role }
-            );
-
-            io.to(opposite).emit('user-online', {
-                id: userId,
-                name,
-                role,
+        // Update user's online status in database
+        User.findByIdAndUpdate(userId, {
+            isOnline: true,
+            lastSeen: null,
+            lastActive: new Date()
+        }, { new: true })
+            .then(updatedUser => {
+                console.log(`📊 User ${fullName} online status updated:`, {
+                    isOnline: updatedUser.isOnline,
+                    lastActive: updatedUser.lastActive
+                });
+            })
+            .catch(err => {
+                console.error('❌ Failed to update user online status:', err.message);
             });
-        } else {
-            console.log(
-                `⏩ Skipping user-online emit (already online)`
-            );
-        }
 
-        // 📨 Handle message sending
-        socket.on('send-message', async ({ toUserId, text, attachment, fileName, fileType, base64Data }) => {
+        // Store online user info
+        onlineUsers.set(userId, {
+            ...socket.user,
+            socketId: socket.id,
+            connectedAt: new Date(),
+            isOnline: true
+        });
+
+        // Emit online status to relevant users
+        emitOnlineStatus(userId, true, io);
+
+        // Load user's active conversations
+        loadUserConversations(userId, socket);
+
+        // ==================== DEBUG EVENTS ====================
+
+        socket.on('debug-ping', (data) => {
+            console.log(`🔔 Debug ping from ${fullName}:`, data);
+            socket.emit('debug-pong', {
+                timestamp: Date.now(),
+                socketId: socket.id,
+                userId,
+                serverTime: new Date().toISOString(),
+                data: data
+            });
+        });
+
+        socket.on('get-connection-info', () => {
+            socket.emit('connection-info', {
+                socketId: socket.id,
+                userId,
+                userInfo: socket.user,
+                connectedAt: logEntry.connectedAt,
+                events: logEntry.events,
+                activeUsersCount: activeUsers.size,
+                onlineUsersCount: onlineUsers.size
+            });
+        });
+
+        // Add this socket event handler in your Socket.IO server:
+        socket.on('load-messages', async (data) => {
+            const { conversationId, page = 1, limit = 50 } = data;
+            const userId = socket.user.id;
+
+            console.log(`📨 Loading messages for conversation: ${conversationId} for user ${userId}`);
+
             try {
-                const sender = socket.user;
-                let attachmentData = null;
-                let result = null;
-
-                /**
-                 * ------------------------------------------
-                 *  HANDLE ATTACHMENT (if exists)
-                 * ------------------------------------------
-                 */
-                if (attachment || base64Data) {
-                    try {
-                        console.log("📤 Incoming attachment:", {
-                            fileName,
-                            fileType,
-                            hasBase64: !!base64Data,
-                            attachmentKeys: attachment ? Object.keys(attachment) : []
-                        });
-
-                        /**
-                         * -----------------------------------------------------
-                         * CASE 2: PRE-UPLOADED CLOUDINARY OBJECT
-                         * -----------------------------------------------------
-                         * Skip Cloudinary upload
-                         */
-                        if (
-                            typeof attachment === 'object' &&
-                            attachment.url &&
-                            attachment.publicId &&
-                            (attachment.filename || attachment.fileName || attachment.name)
-                        ) {
-                            console.log("📦 Pre-uploaded Cloudinary object → Skipped re-upload");
-
-                            attachmentData = {
-                                type: attachment.type || (attachment.mimeType?.startsWith('image/') ? 'image' : 'file'),
-                                url: attachment.url,
-                                filename: attachment.filename || attachment.fileName || attachment.name,
-                                size: attachment.size || attachment.fileSize,
-                                publicId: attachment.publicId,
-                                mimeType: attachment.mimeType,
-                                uploadedAt: new Date(),
-                            };
-
-                            if (attachment.dimensions || (attachment.width && attachment.height)) {
-                                attachmentData.dimensions = {
-                                    width: attachment.width || attachment.dimensions?.width,
-                                    height: attachment.height || attachment.dimensions?.height,
-                                };
-                            }
-
-                            console.log("✅ Using pre-uploaded attachment:", attachmentData);
-                        }
-
-                        /**
-                         * ------------------------------
-                         * CASE 1: BASE64 UPLOAD
-                         * ------------------------------
-                         */
-                        else if (base64Data) {
-                            console.log("☁️ Uploading BASE64 to Cloudinary...");
-
-                            result = await uploadBase64ToCloudinary(base64Data, {
-                                folder: 'chat_attachments',
-                                resource_type: fileType?.startsWith('image/') ? 'image' : 'auto',
-                            });
-
-                            attachmentData = {
-                                type: fileType?.startsWith('image/') ? 'image' : 'file',
-                                url: result.url,
-                                filename: fileName || `file_${Date.now()}`,
-                                size: result.bytes,
-                                publicId: result.publicId,
-                                mimeType: fileType,
-                                uploadedAt: new Date(),
-                            };
-
-                            if (result.width && result.height) {
-                                attachmentData.dimensions = {
-                                    width: result.width,
-                                    height: result.height,
-                                };
-                            }
-                        }
-
-                        /**
-                         * ------------------------------
-                         * CASE 3: RAW BUFFER INPUTS
-                         * ------------------------------
-                         */
-                        else {
-                            let buffer;
-
-                            if (Buffer.isBuffer(attachment)) {
-                                console.log("📦 Direct Buffer received");
-                                buffer = attachment;
-
-                            } else if (attachment?.type === "Buffer" && attachment?.data) {
-                                console.log("📦 {type:'Buffer', data:[]} received");
-                                buffer = Buffer.from(attachment.data);
-
-                            } else if (attachment?.buffer?.data) {
-                                console.log("📦 Flutter .buffer.data array");
-                                buffer = Buffer.from(attachment.buffer.data);
-
-                            } else if (Array.isArray(attachment)) {
-                                console.log("📦 Raw byte array");
-                                buffer = Buffer.from(attachment);
-
-                            } else if (attachment?.data && Array.isArray(attachment.data)) {
-                                console.log("📦 Raw data array");
-                                buffer = Buffer.from(attachment.data);
-
-                            } else if (typeof attachment === 'string') {
-                                console.log("📦 Base64 string detected");
-                                const base64String = attachment.replace(/^data:\w+\/\w+;base64,/, '');
-                                buffer = Buffer.from(base64String, 'base64');
-
-                            } else {
-                                console.log("❌ Unsupported attachment format:", attachment);
-                                throw new Error("Unsupported attachment format");
-                            }
-
-                            console.log("☁️ Uploading BUFFER to Cloudinary... size:", buffer.length);
-
-                            result = await uploadToCloudinary(buffer, {
-                                folder: 'chat_attachments',
-                                resource_type: fileType?.startsWith('image/') ? 'image' : 'auto',
-                            });
-
-                            attachmentData = {
-                                type: fileType?.startsWith('image/') ? 'image' : 'file',
-                                url: result.url,
-                                filename: fileName || `file_${Date.now()}`,
-                                size: result.bytes,
-                                publicId: result.publicId,
-                                mimeType: fileType,
-                                uploadedAt: new Date(),
-                            };
-
-                            if (result.width && result.height) {
-                                attachmentData.dimensions = {
-                                    width: result.width,
-                                    height: result.height,
-                                };
-                            }
-                        }
-
-                        console.log("✅ Final Attachment Data:", attachmentData);
-
-                    } catch (upErr) {
-                        console.error("❌ Upload failed:", upErr);
-                        socket.emit("upload-error", {
-                            message: "File upload failed",
-                            error: upErr.message
-                        });
-                        return;
-                    }
-                }
-
-                /**
-                 * ------------------------------------------
-                 * SAVE MESSAGE
-                 * ------------------------------------------
-                 */
-                const message = new Message({
-                    from: sender.id,
-                    to: toUserId,
-                    text: text || "",
-                    fromName: `${sender.firstName} ${sender.lastName}`.trim(),
-                    fromRole: sender.role,
-                    attachment: attachmentData,
-                    deliveredAt: new Date(),
+                // Verify user is part of conversation
+                const conversation = await Conversation.findOne({
+                    _id: conversationId,
+                    'participants.user': userId
                 });
 
-                await message.save();
-
-                const payload = {
-                    ...message.toObject(),
-                    _id: message._id.toString(),
-                    timestamp: message.timestamp.toISOString(),
-                    deliveredAt: message.deliveredAt.toISOString(),
-                    readAt: message.readAt ? message.readAt.toISOString() : null,
-                };
-
-                /**
-                 * SEND TO RECEIVER
-                 */
-                const receiverSockets = activeUsers.get(toUserId);
-
-                if (receiverSockets?.size) {
-                    receiverSockets.forEach((sid) =>
-                        io.to(sid).emit('receive-message', payload)
-                    );
-
-                    socket.emit("message-delivered", {
-                        messageId: message._id.toString(),
-                        deliveredAt: payload.deliveredAt,
-                    });
-
-                    console.log(`📨 Message delivered to user ${toUserId}`);
-                } else {
-                    console.log("📦 User offline → Message stored");
-                }
-
-                /**
-                 * CONFIRM TO SENDER
-                 */
-                socket.emit("message-sent", payload);
-
-                /**
-                 * SELF MESSAGE → auto mark read
-                 */
-                if (toUserId === sender.id) {
-                    message.readAt = new Date();
-                    await message.save();
-
-                    socket.emit("message-read", {
-                        messageId: message._id.toString(),
-                        readAt: message.readAt.toISOString(),
+                if (!conversation) {
+                    return socket.emit('error', {
+                        type: 'UNAUTHORIZED',
+                        message: 'Not authorized to access this conversation'
                     });
                 }
+
+                const messages = await Message.find({
+                    conversationId: conversationId
+                })
+                    .sort({ timestamp: 1 }) // Ascending for chronological order
+                    .skip((page - 1) * limit)
+                    .limit(limit)
+                    .lean();
+
+                console.log(`✅ Found ${messages.length} messages for conversation ${conversationId}`);
+
+                // Format messages
+                const formattedMessages = messages.map(msg => formatMessage(msg));
+
+                // FIXED: Send as object, not array
+                socket.emit('messages-loaded', {
+                    success: true,
+                    conversationId: conversationId,
+                    messages: formattedMessages,
+                    page: page,
+                    limit: limit,
+                    total: messages.length,
+                    hasMore: messages.length === limit,
+                    timestamp: new Date().toISOString()
+                });
 
             } catch (err) {
-                console.error("💥 send-message FAILED:", err);
-                socket.emit("error", {
-                    message: "Message send failed",
+                console.error('💥 Error loading messages:', err);
+                socket.emit('error', {
+                    type: 'LOAD_MESSAGES_FAILED',
+                    message: 'Failed to load messages',
                     error: err.message
                 });
             }
         });
 
+        // ==================== CONNECTION TESTING ====================
 
+        socket.on('test-connection', ({ targetUserId }) => {
+            const targetSockets = activeUsers.get(targetUserId);
+            const targetUser = onlineUsers.get(targetUserId);
 
-        // ✅ Mark as read
+            const response = {
+                timestamp: new Date().toISOString(),
+                fromUser: {
+                    id: userId,
+                    name: fullName,
+                    socketId: socket.id
+                },
+                toUser: {
+                    id: targetUserId,
+                    isOnline: !!targetSockets,
+                    socketIds: targetSockets ? Array.from(targetSockets) : [],
+                    userInfo: targetUser
+                },
+                connectionStatus: targetSockets ? 'TARGET_ONLINE' : 'TARGET_OFFLINE',
+                message: targetSockets ?
+                    `User is online with ${targetSockets.size} connection(s)` :
+                    'User is offline'
+            };
+
+            console.log(`🔗 Connection test from ${fullName} to ${targetUserId}:`, response);
+
+            socket.emit('test-connection-result', response);
+
+            // If target is online, also notify them
+            if (targetSockets) {
+                targetSockets.forEach(targetSocketId => {
+                    io.to(targetSocketId).emit('connection-test-received', {
+                        from: userId,
+                        fromName: fullName,
+                        timestamp: new Date().toISOString()
+                    });
+                });
+            }
+        });
+
+        // ==================== DIRECT MESSAGES (1:1) ====================
+
+        socket.on('send-message', async (data) => {
+            const startTime = Date.now();
+            const { toUserId, text, attachment, clientId } = data;
+            const sender = socket.user;
+
+            logEntry.events.push({
+                type: 'MESSAGE_SEND_ATTEMPT',
+                timestamp: new Date(),
+                toUserId,
+                hasText: !!text,
+                hasAttachment: !!attachment,
+                clientId
+            });
+
+            try {
+                if (!toUserId) {
+                    throw new Error('Recipient ID is required');
+                }
+
+                // Validate user roles can communicate
+                const canCommunicate = await validateCommunication(sender.id, toUserId);
+                if (!canCommunicate) {
+                    throw new Error('Not authorized to communicate with this user');
+                }
+
+                let attachmentData = null;
+
+                // Handle image upload if attachment is provided
+                if (attachment && attachment.type === 'image' && attachment.base64) {
+                    try {
+                        console.log(`📤 ${fullName} uploading image for ${toUserId}`);
+                        const uploadResult = await uploadBase64ToCloudinary(attachment.base64, {
+                            folder: 'chat_images',
+                            resource_type: 'image'
+                        });
+
+                        attachmentData = {
+                            type: 'image',
+                            url: uploadResult.url,
+                            publicId: uploadResult.publicId,
+                            width: uploadResult.width,
+                            height: uploadResult.height,
+                            size: attachment.size || 0,
+                            filename: attachment.filename || `image_${Date.now()}`,
+                            mimeType: attachment.mimeType || 'image/jpeg'
+                        };
+                    } catch (uploadErr) {
+                        console.error('❌ Image upload failed:', uploadErr);
+                        throw new Error('Failed to upload image');
+                    }
+                }
+
+                // Create or get conversation
+                let conversation = await Conversation.findOne({
+                    type: 'direct',
+                    participants: {
+                        $all: [
+                            { $elemMatch: { user: sender.id } },
+                            { $elemMatch: { user: toUserId } }
+                        ]
+                    }
+                });
+
+                // If no conversation exists, create one
+                if (!conversation) {
+                    conversation = new Conversation({
+                        type: 'direct',
+                        participants: [
+                            { user: sender.id, role: 'member', joinedAt: new Date() },
+                            { user: toUserId, role: 'member', joinedAt: new Date() }
+                        ],
+                        name: 'Direct Chat',
+                        createdBy: sender.id,
+                        settings: {
+                            isPublic: false,
+                            approvalRequired: false
+                        }
+                    });
+                    await conversation.save();
+
+                    console.log(`💬 New conversation created between ${sender.id} and ${toUserId}`);
+
+                    // Notify both users about new conversation
+                    io.to(`user:${sender.id}`).to(`user:${toUserId}`).emit('new-conversation', {
+                        conversation: formatConversation(conversation, userId)
+                    });
+                }
+
+                // Create message
+                const message = new Message({
+                    sender: sender.id,
+                    to: toUserId,
+                    conversationId: conversation._id,
+                    text: text || '',
+                    messageType: attachmentData ? 'image' : 'text',
+                    senderName: fullName,
+                    senderRole: role,
+                    senderAvatar: avatar,
+                    attachment: attachmentData,
+                    metadata: {
+                        clientId,
+                        timestamp: new Date().toISOString(),
+                        socketId: socket.id
+                    }
+                });
+
+                await message.save();
+
+                // Update conversation last message
+                conversation.lastMessage = {
+                    messageId: message._id,
+                    text: text || (attachmentData ? 'Sent an image' : ''),
+                    senderId: sender.id,
+                    senderName: fullName,
+                    timestamp: message.timestamp,
+                    messageType: message.messageType
+                };
+                conversation.messageCount += 1;
+                conversation.updatedAt = new Date();
+                await conversation.save();
+
+                // Format message for sending
+                const formattedMessage = formatMessage(message, sender);
+
+                // Check if recipient is online
+                const recipientSockets = activeUsers.get(toUserId);
+                const isRecipientOnline = recipientSockets?.size > 0;
+
+                logEntry.events.push({
+                    type: 'MESSAGE_PROCESSED',
+                    timestamp: new Date(),
+                    messageId: message._id.toString(),
+                    recipientOnline: isRecipientOnline,
+                    recipientSocketCount: recipientSockets?.size || 0,
+                    processingTime: Date.now() - startTime
+                });
+
+                // Send to recipient if online
+                if (recipientSockets?.size) {
+                    // Mark as delivered
+                    message.deliveredAt = new Date();
+                    await message.save();
+
+                    console.log(`📨 Message from ${fullName} to ${toUserId} (online)`, {
+                        messageId: message._id,
+                        recipientSockets: Array.from(recipientSockets)
+                    });
+
+                    // Emit to recipient
+                    recipientSockets.forEach(sid => {
+                        io.to(sid).emit('receive-message', {
+                            ...formattedMessage,
+                            conversationId: conversation._id.toString(),
+                            delivered: true,
+                            deliveredAt: message.deliveredAt.toISOString()
+                        });
+                    });
+
+                    // Send delivery confirmation to sender
+                    socket.emit('message-delivered', {
+                        messageId: message._id.toString(),
+                        deliveredAt: message.deliveredAt.toISOString(),
+                        conversationId: conversation._id.toString(),
+                        recipientOnline: true
+                    });
+                } else {
+                    console.log(`📨 Message from ${fullName} to ${toUserId} (offline - queued)`);
+                    socket.emit('message-queued', {
+                        messageId: message._id.toString(),
+                        conversationId: conversation._id.toString(),
+                        recipientOnline: false,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+
+                // Send to sender (for their own UI)
+                socket.emit('message-sent', {
+                    ...formattedMessage,
+                    conversationId: conversation._id.toString(),
+                    sentAt: new Date().toISOString()
+                });
+
+                // Update conversation list for both users
+                io.to(`user:${sender.id}`).to(`user:${toUserId}`).emit('conversation-updated', {
+                    conversationId: conversation._id.toString(),
+                    lastMessage: formattedMessage,
+                    updatedAt: conversation.updatedAt,
+                    recipientOnline: isRecipientOnline
+                });
+
+            } catch (err) {
+                console.error('💥 send-message error:', err);
+                logEntry.events.push({
+                    type: 'MESSAGE_SEND_ERROR',
+                    timestamp: new Date(),
+                    error: err.message,
+                    stack: err.stack
+                });
+                socket.emit('error', {
+                    type: 'MESSAGE_SEND_FAILED',
+                    message: 'Failed to send message',
+                    error: err.message,
+                    clientId: data.clientId
+                });
+            }
+        });
+
+        // ==================== TYPING INDICATORS ====================
+
+        socket.on('typing-start', ({ toUserId, conversationId }) => {
+            console.log(`✍️  ${fullName} typing to ${toUserId}`);
+
+            const receiverSockets = activeUsers.get(toUserId);
+            if (receiverSockets?.size) {
+                receiverSockets.forEach(sid => {
+                    io.to(sid).emit('user-typing', {
+                        fromUserId: userId,
+                        fromName: fullName,
+                        conversationId: conversationId || null
+                    });
+                });
+            }
+
+            // Clear existing timeout
+            const existing = typingUsers.get(socket.id);
+            if (existing?.timeout) clearTimeout(existing.timeout);
+
+            // Set timeout to auto-stop typing after 3 seconds
+            const timeout = setTimeout(() => {
+                socket.emit('typing-stop', { toUserId });
+            }, 3000);
+
+            typingUsers.set(socket.id, {
+                target: toUserId,
+                type: 'direct',
+                conversationId,
+                timeout: timeout
+            });
+        });
+
+        socket.on('typing-stop', ({ toUserId }) => {
+            console.log(`✍️  ${fullName} stopped typing to ${toUserId}`);
+
+            const receiverSockets = activeUsers.get(toUserId);
+            if (receiverSockets?.size) {
+                receiverSockets.forEach(sid => {
+                    io.to(sid).emit('user-stopped-typing', {
+                        fromUserId: userId,
+                        conversationId: null
+                    });
+                });
+            }
+
+            const existing = typingUsers.get(socket.id);
+            if (existing?.timeout) clearTimeout(existing.timeout);
+            typingUsers.delete(socket.id);
+        });
+
+        // ==================== CONNECTION MONITORING ====================
+
+        socket.on('get-online-status', ({ userIds }) => {
+            console.log(`👤 User ${fullName} requesting online status for: ${userIds}`);
+
+            const statuses = {};
+            userIds.forEach(userId => {
+                statuses[userId] = activeUsers.has(userId);
+            });
+
+            socket.emit('online-status-response', {
+                statuses,
+                timestamp: new Date().toISOString()
+            });
+        });
+
+        socket.on('update-presence', ({ status }) => {
+            console.log(`👤 ${fullName} presence updated: ${status}`);
+
+            // Emit presence change to relevant users
+            Conversation.find({
+                'participants.user': userId,
+                type: 'direct'
+            })
+                .then(conversations => {
+                    conversations.forEach(conv => {
+                        const otherParticipant = conv.participants.find(p => p.user.toString() !== userId);
+                        if (otherParticipant) {
+                            const recipientSockets = activeUsers.get(otherParticipant.user.toString());
+                            if (recipientSockets) {
+                                recipientSockets.forEach(sid => {
+                                    io.to(sid).emit('user-presence-changed', {
+                                        userId,
+                                        isOnline: status === 'online',
+                                        timestamp: new Date().toISOString()
+                                    });
+                                });
+                            }
+                        }
+                    });
+                });
+        });
+
+        // Add this event for loading conversations
+        socket.on('load-conversations', () => {
+            console.log(`📋 Loading conversations for ${fullName}`);
+            loadUserConversations(userId, socket);
+        });
+
+        socket.on('mark-conversation-read', ({ conversationId }) => {
+            console.log(`📖 Marking conversation ${conversationId} as read by ${fullName}`);
+
+            // Update conversation unread count
+            Conversation.findByIdAndUpdate(conversationId, {
+                $set: { 'lastMessage.readBy': userId }
+            }).catch(console.error);
+        });
+
         socket.on('mark-as-read', async ({ messageId }) => {
             try {
-                const message = await Message.findById(messageId);
-                if (!message || message.to.toString() !== socket.user.id) return;
+                console.log(`👁 Marking message ${messageId} as read by ${fullName}`);
 
-                if (!message.readAt) {
+                const message = await Message.findById(messageId);
+                if (!message) return;
+
+                // Add user to readBy if not already there
+                if (!message.readBy.includes(userId)) {
+                    message.readBy.push(userId);
                     message.readAt = new Date();
                     await message.save();
 
-                    const senderSockets = activeUsers.get(message.from.toString());
+                    // Notify sender that their message was read
+                    const senderSockets = activeUsers.get(message.sender.toString());
                     if (senderSockets?.size) {
-                        senderSockets.forEach((sid) =>
+                        senderSockets.forEach(sid => {
                             io.to(sid).emit('message-read', {
                                 messageId: message._id.toString(),
+                                readBy: userId,
                                 readAt: message.readAt.toISOString(),
-                            })
-                        );
+                                conversationId: message.conversationId.toString()
+                            });
+                        });
                     }
                 }
             } catch (err) {
-                console.error('💥 Error marking message as read:', err);
+                console.error('❌ Error marking message as read:', err);
             }
         });
 
-        // ✍️ Typing start
-        // ▶️ Typing start
-        socket.on('typing-start', ({ toUserId }) => {
-            console.log('⌨️ typing-start received');
-            console.log('   From socket:', socket.id);
-            console.log('   From user:', socket.user?.id);
-            console.log('   To user:', toUserId);
+        socket.on('get-online-users', () => {
+            const users = Array.from(onlineUsers.entries()).map(([id, user]) => ({
+                id,
+                name: user.fullName,
+                role: user.role,
+                avatar: user.avatar,
+                isOnline: true,
+                socketCount: activeUsers.get(id)?.size || 0,
+                lastActive: user.lastActive
+            }));
 
-            const existing = typingUsers.get(socket.id);
-            if (existing?.timeout) {
-                console.log('   ⏹️ Clearing previous stop-typing timeout');
-                clearTimeout(existing.timeout);
-            }
-
-            typingUsers.set(socket.id, { targetUserId: toUserId });
-
-            const receiverSockets = activeUsers.get(toUserId);
-            console.log(
-                '   📡 Receiver sockets:',
-                receiverSockets ? Array.from(receiverSockets) : 'NONE'
-            );
-
-            if (receiverSockets?.size) {
-                receiverSockets.forEach((sid) => {
-                    console.log(`   ➡️ Emitting user-typing to socket ${sid}`);
-                    io.to(sid).emit('user-typing', {
-                        fromUserId: socket.user.id,
-                        name: `${socket.user.firstName} ${socket.user.lastName}`.trim(),
-                    });
-                });
-            } else {
-                console.log('   ⚠️ No active sockets for receiver');
-            }
+            socket.emit('online-users-list', {
+                users,
+                total: users.length,
+                timestamp: new Date().toISOString()
+            });
         });
 
-        // ⏹️ Typing stop
-        socket.on('typing-stop', ({ toUserId }) => {
-            console.log('✋ typing-stop received');
-            console.log('   From socket:', socket.id);
-            console.log('   From user:', socket.user?.id);
-            console.log('   To user:', toUserId);
+        socket.on('check-user-status', ({ userId: targetUserId }) => {
+            const isOnline = activeUsers.has(targetUserId);
+            const user = onlineUsers.get(targetUserId);
 
-            const existing = typingUsers.get(socket.id);
-
-            if (!existing) {
-                console.log('   ❌ No typing state found for this socket');
-                return;
-            }
-
-            if (existing.targetUserId !== toUserId) {
-                console.log(
-                    '   ⚠️ Target mismatch:',
-                    'expected',
-                    existing.targetUserId,
-                    'got',
-                    toUserId
-                );
-                return;
-            }
-
-            console.log('   ⏳ Scheduling stop-typing emit in 1s');
-
-            const timeout = setTimeout(() => {
-                const receiverSockets = activeUsers.get(toUserId);
-                console.log(
-                    '   📡 Receiver sockets (stop):',
-                    receiverSockets ? Array.from(receiverSockets) : 'NONE'
-                );
-
-                if (receiverSockets?.size) {
-                    receiverSockets.forEach((sid) => {
-                        console.log(`   ➡️ Emitting user-stopped-typing to socket ${sid}`);
-                        io.to(sid).emit('user-stopped-typing', {
-                            fromUserId: socket.user.id,
-                        });
-                    });
-                } else {
-                    console.log('   ⚠️ No active sockets for receiver (stop)');
-                }
-
-                typingUsers.delete(socket.id);
-                console.log('   🧹 Typing state cleared for socket', socket.id);
-            }, 1000);
-
-            typingUsers.set(socket.id, { targetUserId: toUserId, timeout });
+            socket.emit('user-status-response', {
+                userId: targetUserId,
+                isOnline,
+                userInfo: user,
+                socketCount: isOnline ? activeUsers.get(targetUserId).size : 0,
+                timestamp: new Date().toISOString()
+            });
         });
 
+        // ==================== GROUP MESSAGES ====================
 
-        // 📜 Load chat history
-        socket.on('load-history', async ({ targetUserId }) => {
+        // Add to socket events in your Socket.IO server
+        socket.on('send-group-message', async (data) => {
+            const { groupId, text, attachment, clientId } = data;
+            const sender = socket.user;
+
             try {
-                const currentUserId = socket.user.id;
-
-                console.log(`📖 Loading chat history between ${currentUserId} and ${targetUserId}`);
-
-                // Validate that targetUserId is different from current user
-                if (currentUserId === targetUserId) {
-                    console.log('⚠️ User trying to load chat with themselves');
-                    return socket.emit('error', { message: 'Cannot load chat with yourself' });
+                // Get group
+                const group = await Conversation.findById(groupId);
+                if (!group || group.type !== 'group') {
+                    throw new Error('Group not found');
                 }
 
-                // Find messages where either:
-                // 1. current user sent to target user
-                // 2. target user sent to current user
-                const messages = await Message.find({
-                    $or: [
-                        { from: currentUserId, to: targetUserId },
-                        { from: targetUserId, to: currentUserId },
-                    ],
-                })
-                    .sort({ timestamp: 1 })
-                    .lean();
+                // Check if user is member of group
+                const isMember = group.participants.some(p =>
+                    p.user.toString() === sender.id
+                );
 
-                console.log(`✅ Found ${messages.length} messages for ${currentUserId} ↔ ${targetUserId}`);
+                if (!isMember) {
+                    throw new Error('Not a member of this group');
+                }
 
-                // Transform messages for client
-                const formattedMessages = messages.map(message => ({
-                    id: message._id.toString(),
-                    text: message.text || '',
-                    fromUserId: message.from.toString(),
+                let attachmentData = null;
+
+                // Handle image upload
+                if (attachment && attachment.type === 'image' && attachment.base64) {
+                    const uploadResult = await uploadBase64ToCloudinary(attachment.base64, {
+                        folder: 'group_chat_images',
+                        resource_type: 'image'
+                    });
+
+                    attachmentData = {
+                        type: 'image',
+                        url: uploadResult.url,
+                        publicId: uploadResult.publicId,
+                        width: uploadResult.width,
+                        height: uploadResult.height,
+                        size: attachment.size || 0,
+                        filename: attachment.filename || `image_${Date.now()}`,
+                        mimeType: attachment.mimeType || 'image/jpeg'
+                    };
+                }
+
+                // Create message
+                const message = new Message({
+                    sender: sender.id,
+                    conversationId: groupId,
+                    text: text || '',
+                    messageType: attachmentData ? 'image' : 'text',
+                    senderName: sender.fullName,
+                    senderRole: sender.role,
+                    senderAvatar: sender.avatar,
+                    attachment: attachmentData,
+                    metadata: {
+                        clientId,
+                        isGroup: true,
+                        timestamp: new Date().toISOString(),
+                        socketId: socket.id
+                    }
+                });
+
+                await message.save();
+
+                // Update group last message
+                group.lastMessage = {
+                    messageId: message._id,
+                    text: text || (attachmentData ? 'Sent an image' : ''),
+                    senderId: sender.id,
+                    senderName: sender.fullName,
+                    timestamp: message.timestamp,
+                    messageType: message.messageType
+                };
+                group.messageCount += 1;
+                group.updatedAt = new Date();
+                await group.save();
+
+                // Format message
+                const formattedMessage = {
+                    ...message.toObject(),
+                    _id: message._id.toString(),
                     timestamp: message.timestamp.toISOString(),
-                    delivered: !!message.deliveredAt,
-                    read: !!message.readAt,
-                    attachment: message.attachment ? {
-                        type: message.attachment.type,
-                        url: message.attachment.url,
-                        fileName: message.attachment.filename,
-                        fileSize: message.attachment.size,
-                        mimeType: message.attachment.mimeType,
-                        publicId: message.attachment.publicId,
-                    } : null,
-                }));
+                    metadata: {
+                        ...message.metadata,
+                        isGroup: true,
+                        groupId: groupId
+                    }
+                };
 
-                socket.emit('chat-history', formattedMessages);
+                // Send to all group members who are online
+                const onlineMembers = [];
+
+                for (const participant of group.participants) {
+                    const userId = participant.user.toString();
+                    if (userId === sender.id) continue;
+
+                    const memberSockets = activeUsers.get(userId);
+                    if (memberSockets?.size) {
+                        memberSockets.forEach(sid => {
+                            io.to(sid).emit('receive-group-message', {
+                                ...formattedMessage,
+                                conversationId: groupId,
+                                groupId: groupId,
+                                groupName: group.name
+                            });
+                            onlineMembers.push(userId);
+                        });
+                    }
+                }
+
+                // Send confirmation to sender
+                socket.emit('group-message-sent', {
+                    ...formattedMessage,
+                    conversationId: groupId,
+                    groupId: groupId,
+                    onlineMembers,
+                    sentAt: new Date().toISOString()
+                });
+
+                // Update conversations for all members
+                for (const participant of group.participants) {
+                    const userId = participant.user.toString();
+                    const userSockets = activeUsers.get(userId);
+                    if (userSockets?.size) {
+                        userSockets.forEach(sid => {
+                            io.to(sid).emit('conversation-updated', {
+                                conversationId: groupId,
+                                lastMessage: formattedMessage,
+                                updatedAt: group.updatedAt,
+                                groupId: groupId
+                            });
+                        });
+                    }
+                }
 
             } catch (err) {
-                console.error('💥 Error loading chat history:', err);
-                socket.emit('error', { message: 'Failed to load chat history', error: err.message });
+                console.error('💥 send-group-message error:', err);
+                socket.emit('error', {
+                    type: 'GROUP_MESSAGE_SEND_FAILED',
+                    message: 'Failed to send group message',
+                    error: err.message,
+                    clientId: data.clientId
+                });
             }
         });
 
-        // 🔍 Get active users
-        socket.on('get-active-users', () => {
-            const users = Array.from(activeUsers.entries()).map(([userId, sockets]) => ({
-                userId,
-                socketCount: sockets.size,
-            }));
-            socket.emit('active-users-list', users);
+        // Group typing indicators
+        socket.on('group-typing-start', ({ groupId }) => {
+            const sender = socket.user;
+
+            // Notify all group members except sender
+            const group = Conversation.findById(groupId);
+            if (group) {
+                group.participants.forEach(participant => {
+                    const userId = participant.user.toString();
+                    if (userId !== sender.id) {
+                        const memberSockets = activeUsers.get(userId);
+                        if (memberSockets?.size) {
+                            memberSockets.forEach(sid => {
+                                io.to(sid).emit('group-user-typing', {
+                                    fromUserId: sender.id,
+                                    fromName: sender.fullName,
+                                    groupId: groupId
+                                });
+                            });
+                        }
+                    }
+                });
+            }
         });
 
-        // ❌ Disconnect cleanup
-        socket.on('disconnect', async () => {
+        socket.on('group-typing-stop', ({ groupId }) => {
+            const sender = socket.user;
+
+            // Notify all group members except sender
+            const group = Conversation.findById(groupId);
+            if (group) {
+                group.participants.forEach(participant => {
+                    const userId = participant.user.toString();
+                    if (userId !== sender.id) {
+                        const memberSockets = activeUsers.get(userId);
+                        if (memberSockets?.size) {
+                            memberSockets.forEach(sid => {
+                                io.to(sid).emit('group-user-stopped-typing', {
+                                    fromUserId: sender.id,
+                                    groupId: groupId
+                                });
+                            });
+                        }
+                    }
+                });
+            }
+        });
+
+        // ==================== PING/PONG for Connection Health ====================
+
+        let pingInterval;
+
+        socket.on('ping', (data) => {
+            socket.emit('pong', {
+                timestamp: Date.now(),
+                serverTime: new Date().toISOString(),
+                data: data
+            });
+        });
+
+        // Start periodic health check
+        pingInterval = setInterval(() => {
+            socket.emit('health-check', {
+                timestamp: Date.now(),
+                connectionId: socket.id,
+                serverTime: new Date().toISOString()
+            });
+        }, 30000); // Every 30 seconds
+
+        // ==================== DISCONNECT ====================
+
+        socket.on('disconnect', async (reason) => {
+            // Get userId from socketToUser map before anything else
             const userId = socketToUser.get(socket.id);
+            const userName = userId ? (onlineUsers.get(userId)?.fullName || 'Unknown user') : 'Unknown user';
+
+            console.log(`❌ ${userName} disconnected: ${socket.id}`, {
+                reason,
+                userId,
+                connectedFor: Date.now() - new Date(logEntry.connectedAt).getTime()
+            });
+
+            logEntry.events.push({
+                type: 'DISCONNECTED',
+                timestamp: new Date(),
+                reason,
+                duration: Date.now() - new Date(logEntry.connectedAt).getTime(),
+                userId: userId || null
+            });
+
+            // Clean up intervals
+            if (pingInterval) clearInterval(pingInterval);
+
+            // Remove from socketToUser map
             socketToUser.delete(socket.id);
 
+            // Clear typing timeout
             const typingData = typingUsers.get(socket.id);
             if (typingData?.timeout) clearTimeout(typingData.timeout);
             typingUsers.delete(socket.id);
@@ -513,23 +942,252 @@ const initChat = (server) => {
                 userSockets.delete(socket.id);
 
                 if (userSockets.size === 0) {
+                    // User is completely offline
                     activeUsers.delete(userId);
-                    await User.findByIdAndUpdate(userId, { lastSeen: new Date() }).catch(console.error);
+                    onlineUsers.delete(userId);
 
-                    const role = socket.user.role;
-                    const opposite = role === 'hr' ? 'employee' : 'hr';
-                    io.to(opposite).emit('user-offline', { id: userId });
-                    console.log(`🔴 Disconnected: ${role} ${socket.user.firstName} ${socket.user.lastName}`);
+                    await User.findByIdAndUpdate(userId, {
+                        lastSeen: new Date(),
+                        isOnline: false,
+                        lastActive: new Date()
+                    }).catch(console.error);
+
+                    console.log(`👋 ${userName} is now offline`);
+
+                    // Notify others
+                    emitOnlineStatus(userId, false, io);
+                } else {
+                    console.log(`🔄 ${userName} still has ${userSockets.size} other connection(s)`);
                 }
             }
+
+            // Clean up logs after 5 minutes
+            setTimeout(() => {
+                connectionLogs.delete(socket.id);
+            }, 300000);
         });
+
+        // ==================== INITIALIZATION COMPLETE ====================
+
+        socket.emit('connection-established', {
+            socketId: socket.id,
+            userId,
+            userInfo: socket.user,
+            serverTime: new Date().toISOString(),
+            onlineUsersCount: onlineUsers.size,
+            message: 'Successfully connected to chat server'
+        });
+
+        console.log(`🚀 ${fullName} chat initialization complete`);
+
+
+
     });
 
     return io;
 };
 
+// ==================== HELPER FUNCTIONS ====================
+
+async function validateCommunication(senderId, receiverId) {
+    try {
+        const [sender, receiver] = await Promise.all([
+            User.findById(senderId).select('role department status'),
+            User.findById(receiverId).select('role department status')
+        ]);
+
+        if (!sender || !receiver) {
+            console.log(`❌ Validation failed: User not found`, { senderId, receiverId });
+            return false;
+        }
+
+        // Check if both users are active
+        if (sender.status !== 'active' || receiver.status !== 'active') {
+            console.log(`❌ Validation failed: User not active`, {
+                senderStatus: sender.status,
+                receiverStatus: receiver.status
+            });
+            return false;
+        }
+
+        const roles = [sender.role, receiver.role];
+
+        // All roles can communicate with each other in 1:1 chat
+        const allowedRoles = ['hr', 'manager', 'employee'];
+
+        const canCommunicate = allowedRoles.includes(sender.role) && allowedRoles.includes(receiver.role);
+
+        console.log(`🔍 Communication validation: ${senderId} → ${receiverId}`, {
+            canCommunicate,
+            senderRole: sender.role,
+            receiverRole: receiver.role
+        });
+
+        return canCommunicate;
+    } catch (err) {
+        console.error('❌ Validation error:', err);
+        return false;
+    }
+}
+
+function formatMessage(message, sender = null) {
+    const msgObj = message.toObject ? message.toObject() : message;
+
+    return {
+        id: msgObj._id.toString(),
+        text: msgObj.text || '',
+        senderId: msgObj.sender?.toString() || msgObj.from?.toString(),
+        senderName: msgObj.senderName || (sender ? sender.fullName : ''),
+        senderRole: msgObj.senderRole || (sender ? sender.role : ''),
+        senderAvatar: msgObj.senderAvatar || (sender ? sender.avatar : ''),
+        timestamp: msgObj.timestamp ? new Date(msgObj.timestamp).toISOString() : new Date().toISOString(),
+        deliveredAt: msgObj.deliveredAt ? new Date(msgObj.deliveredAt).toISOString() : null,
+        readAt: msgObj.readAt ? new Date(msgObj.readAt).toISOString() : null,
+        readBy: msgObj.readBy || [],
+        messageType: msgObj.messageType || 'text',
+        conversationId: msgObj.conversationId?.toString(),
+        attachment: msgObj.attachment || null,
+        metadata: msgObj.metadata || {}
+    };
+}
+
+function formatConversation(conversation, userId) {
+    const convObj = conversation.toObject ? conversation.toObject() : conversation;
+
+    const otherParticipant = convObj.participants?.find(p => p.user.toString() !== userId);
+    const otherUser = otherParticipant?.user;
+
+    return {
+        id: convObj._id.toString(),
+        name: convObj.name,
+        type: convObj.type,
+        avatar: convObj.avatar,
+        lastMessage: convObj.lastMessage || null,
+        messageCount: convObj.messageCount || 0,
+        unreadCount: convObj.unreadCount || 0,
+        updatedAt: convObj.updatedAt ? new Date(convObj.updatedAt).toISOString() : new Date().toISOString(),
+        createdAt: convObj.createdAt ? new Date(convObj.createdAt).toISOString() : new Date().toISOString(),
+        participants: convObj.participants || [],
+        otherParticipant: otherParticipant,
+        otherUserId: otherUser,
+        isOtherUserOnline: otherUser ? activeUsers.has(otherUser.toString()) : false
+    };
+}
+
+// In your Socket.IO server code:
+async function loadUserConversations(userId, socket) {
+    try {
+        console.log(`📂 Loading conversations for user: ${userId}`);
+
+        const conversations = await Conversation.find({
+            'participants.user': userId,
+            type: 'direct'
+        })
+            .sort({ updatedAt: -1 })
+            .limit(50)
+            .populate('participants.user', 'firstName lastName email role profilePicture isOnline lastSeen')
+            .lean();
+
+        console.log(`📂 Found ${conversations.length} conversations for ${userId}`);
+
+        const formattedConversations = conversations.map(conv =>
+            formatConversation(conv, userId)
+        );
+
+        // FIXED: Send as object with conversations array
+        socket.emit('conversations-loaded', {
+            success: true,
+            conversations: formattedConversations,
+            count: formattedConversations.length,
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (err) {
+        console.error('💥 Error loading conversations:', err);
+        socket.emit('error', {
+            type: 'LOAD_CONVERSATIONS_FAILED',
+            message: 'Failed to load conversations',
+            error: err.message
+        });
+    }
+}
+
+function emitOnlineStatus(userId, isOnline, io) {
+    const user = onlineUsers.get(userId);
+    if (!user && isOnline) return;
+
+    const statusEvent = isOnline ? 'user-online' : 'user-offline';
+    const statusData = {
+        userId,
+        isOnline,
+        timestamp: new Date().toISOString(),
+        userInfo: user ? {
+            name: user.fullName,
+            role: user.role,
+            avatar: user.avatar,
+            department: user.department
+        } : null
+    };
+
+    console.log(`📢 Emitting ${statusEvent} for user ${userId}`);
+
+    // Notify all users who have conversations with this user
+    Conversation.find({
+        'participants.user': userId,
+        type: 'direct'
+    })
+        .then(conversations => {
+            conversations.forEach(conv => {
+                const otherParticipant = conv.participants.find(p => p.user.toString() !== userId);
+                if (otherParticipant) {
+                    const recipientSockets = activeUsers.get(otherParticipant.user.toString());
+                    if (recipientSockets) {
+                        recipientSockets.forEach(sid => {
+                            io.to(sid).emit(statusEvent, statusData);
+                        });
+                    }
+                }
+            });
+        })
+        .catch(err => {
+            console.error('❌ Error emitting online status:', err);
+        });
+}
+
+// Debug function to get connection statistics
+function getConnectionStats() {
+    return {
+        totalConnections: ioInstance ? ioInstance.sockets.sockets.size : 0,
+        activeUsers: activeUsers.size,
+        onlineUsers: onlineUsers.size,
+        connectionLogs: connectionLogs.size,
+        userConnectionHistory: userConnectionHistory.size,
+        timestamp: new Date().toISOString()
+    };
+}
+
+// Function to debug specific user connection
+function debugUserConnection(userId) {
+    const sockets = activeUsers.get(userId);
+    const userInfo = onlineUsers.get(userId);
+    const history = userConnectionHistory.get(userId) || [];
+
+    return {
+        userId,
+        isOnline: !!sockets,
+        socketIds: sockets ? Array.from(sockets) : [],
+        userInfo,
+        connectionHistory: history.slice(-10), // Last 10 connections
+        currentConnections: sockets?.size || 0
+    };
+}
+
 module.exports = {
     initChat,
-    activeUsers: () => activeUsers,
     getIo: () => ioInstance,
+    getOnlineUsers: () => Array.from(onlineUsers.values()),
+    getConnectionStats,
+    debugUserConnection,
+    isUserOnline: (userId) => activeUsers.has(userId),
+    getUserSockets: (userId) => activeUsers.get(userId)
 };

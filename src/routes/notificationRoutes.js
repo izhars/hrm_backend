@@ -8,6 +8,7 @@ const {
   deleteNotification,
   deleteMultiple,
   getNotificationCounts, // ✅ new import
+  sendCallNotification
 } = require('../controllers/notificationController');
 const { protect, hrAndAbove, superAdminOnly } = require('../middleware/auth');
 
@@ -16,6 +17,9 @@ router.use(protect);
 
 // Create (single, multiple, or roles)
 router.post('/', hrAndAbove, createNotification);
+
+// Add to routes/notificationRoutes.js
+router.post('/call', protect, sendCallNotification);
 
 // Get my notifications (with filters)
 router.get('/me', getMyNotifications);

@@ -57,32 +57,34 @@ function scheduleAttendanceNotifications() {
   // Morning Punch-In: 9:00 AM
   cron.schedule('0 9 * * *', async () => {
     const employees = await getEmployeesToNotify('morning_in');
-    console.log(`⏰ Morning punch-in reminders for ${employees.length} employees`);
-    await Promise.all(employees.map(id => notifyMorningPunchIn(id)));
+    await Promise.all(employees.map(id => notifyMorningPunchIn(id).catch(err => {
+      console.error(`❌ Morning punch-in notification failed for employee ${id}:`, err.message);
+    })));
   });
 
   // Morning Punch-Out: 1:00 PM
   cron.schedule('0 13 * * *', async () => {
     const employees = await getEmployeesToNotify('morning_out');
-    console.log(`⏰ Morning punch-out reminders for ${employees.length} employees`);
-    await Promise.all(employees.map(id => notifyMorningPunchOut(id)));
+    await Promise.all(employees.map(id => notifyMorningPunchOut(id).catch(err => {
+      console.error(`❌ Morning punch-out notification failed for employee ${id}:`, err.message);
+    })));
   });
 
   // Evening Punch-In: 2:00 PM
   cron.schedule('0 14 * * *', async () => {
     const employees = await getEmployeesToNotify('evening_in');
-    console.log(`⏰ Evening punch-in reminders for ${employees.length} employees`);
-    await Promise.all(employees.map(id => notifyEveningPunchIn(id)));
+    await Promise.all(employees.map(id => notifyEveningPunchIn(id).catch(err => {
+      console.error(`❌ Evening punch-in notification failed for employee ${id}:`, err.message);
+    })));
   });
 
   // Evening Punch-Out: 6:00 PM
   cron.schedule('0 18 * * *', async () => {
     const employees = await getEmployeesToNotify('evening_out');
-    console.log(`⏰ Evening punch-out reminders for ${employees.length} employees`);
-    await Promise.all(employees.map(id => notifyEveningPunchOut(id)));
+    await Promise.all(employees.map(id => notifyEveningPunchOut(id).catch(err => {
+      console.error(`❌ Evening punch-out notification failed for employee ${id}:`, err.message);
+    })));
   });
-
-  console.log('✅ Attendance notification scheduler initialized.');
 }
 
 module.exports = scheduleAttendanceNotifications;

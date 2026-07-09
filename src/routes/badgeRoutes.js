@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 
 // Import upload middleware - CORRECT WAY
-const { upload } = require('../middleware/upload');
+const { badgeUpload } = require('../middleware/upload');
 
 const {
   createBadge,
@@ -18,7 +18,7 @@ router.use(protect);
 router.use(authorize('hr', 'superadmin'));
 
 // Create a new badge (with image upload)
-router.post('/', upload.single('image'), createBadge);
+router.post('/', badgeUpload.single('image'), createBadge);
 
 // Get all badges
 router.get('/', getBadges);

@@ -1,16 +1,6 @@
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 
-/**
- * @desc    Get notification filter based on user role
- * @param   {Object} user - User object with role
- * @returns {Object} MongoDB filter for notifications
- */
-/**
- * @desc    Get notification filter based on user role
- * @param   {Object} user - User object with role
- * @returns {Object} MongoDB filter for notifications
- */
 const getNotificationFilterByRole = (user) => {
   const userId = user._id.toString();
   
@@ -233,9 +223,9 @@ exports.getMyNotifications = async (req, res) => {
       if (to) filter.createdAt.$lte = new Date(to);
     }
 
-    console.log('User ID:', req.user._id);
-    console.log('User Role:', req.user.role);
-    console.log('Filter being used:', JSON.stringify(filter, null, 2));
+    // console.log('User ID:', req.user._id);
+    // console.log('User Role:', req.user.role);
+    // console.log('Filter being used:', JSON.stringify(filter, null, 2));
     
     const [notifications, total] = await Promise.all([
       Notification.find(filter)
@@ -487,4 +477,95 @@ exports.clearAllNotifications = async (req, res) => {
     console.error('Clear All Error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
+};
+
+
+exports.sendCallNotification = async (req, res) => {
+    try {
+        const { callId } = req.params;
+        const { title, message, type = 'info', targetUserIds } = req.body;
+
+        const call = await AgoraCall.findOne({
+            callId,
+            deleted: false
+        });
+
+        if (!call) {
+            return res.status(404).json({
+                success: false,
+                message: 'Call not found'
+            });
+        }
+
+        // Check if user is a participant
+        const isParticipant = call.participants.some(p => 
+            p.user.toString() === req.user._id.toString()
+        );
+
+        if (!isParticipant && call.initiator.toString() !== req.user._id.toString()) {
+            return res.status(403).json({
+                success: false,
+                message: 'Not authorized to send notifications for this call'
+            });
+        }
+
+        // Determine target users
+        let recipients = [];
+        if (targetUserIds && Array.isArray(targetUserIds)) {
+            recipients = targetUserIds;
+        } else {
+            // Send to all participants except sender
+            recipients = call.participants
+                .filter(p => p.user.toString() !== req.user._id.toString())
+                .map(p => p.user);
+        }
+
+        if (recipients.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'No recipients specified'
+            });
+        }
+
+        // Send notifications
+        const notification = await createNotificationDirect({
+            userIds: recipients,
+            title,
+            message,
+            type: 'call',
+            link: `/call/${callId}`,
+            meta: {
+                callId,
+                action: 'call_notification',
+                sentBy: req.user._id,
+                sentByName: req.user.name
+            }
+        }, req.user);
+
+        // Emit socket event
+        if (req.io) {
+            recipients.forEach(userId => {
+                req.io.to(`user:${userId.toString()}`).emit('call:notification', {
+                    callId,
+                    title,
+                    message,
+                    type,
+                    sentBy: req.user._id,
+                    timestamp: new Date()
+                });
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Notification sent',
+            data: {
+                recipients: recipients.length,
+                notification
+            }
+        });
+    } catch (err) {
+        console.error('Send Call Notification Error:', err);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
 };

@@ -1,5 +1,6 @@
+// controllers/departmentController.js
 const Department = require('../models/Department');
-const User = require('../models/User'); // Employees
+const User = require('../models/User');
 
 // @desc    Get all departments
 // @route   GET /api/departments
@@ -10,7 +11,7 @@ exports.getAllDepartments = async (req, res) => {
 
     const query = {};
 
-    // Default: fetch only active departments
+    // Default: only active departments
     if (isActive !== undefined) {
       query.isActive = isActive === 'true';
     } else {
@@ -36,12 +37,10 @@ exports.getAllDepartments = async (req, res) => {
       count: departmentsWithCount.length,
       departments: departmentsWithCount
     });
-
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
-
 
 // @desc    Get single department
 // @route   GET /api/departments/:id
@@ -58,7 +57,6 @@ exports.getDepartment = async (req, res) => {
       });
     }
     
-    // Get department employees
     const employees = await User.find({ 
       department: req.params.id, 
       isActive: true 
@@ -70,16 +68,10 @@ exports.getDepartment = async (req, res) => {
       employees
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// @desc    Create department
-// @route   POST /api/departments
-// @access  Private (HR, Admin)
 // @desc    Create department
 // @route   POST /api/departments
 // @access  Private (HR, Admin, Superadmin)
@@ -87,39 +79,25 @@ exports.createDepartment = async (req, res) => {
   try {
     const { name, code, description, head } = req.body;
 
-    console.log("📥 [CREATE-DEPARTMENT] Incoming request:", {
-      name,
-      code,
-      description,
-      head: head || "No head provided"
-    });
-
     // Check duplicates
     const existingDept = await Department.findOne({
       $or: [{ name }, { code }]
     });
 
     if (existingDept) {
-      console.log("⚠️ [CREATE-DEPARTMENT] Duplicate found:", existingDept.name);
       return res.status(400).json({
         success: false,
         message: 'Department name or code already exists'
       });
     }
 
-    // Payload setup
     const payload = { name, code, description };
 
     if (head) {
-      console.log("👤 [CREATE-DEPARTMENT] Assigning department head:", head);
       payload.head = head;
-    } else {
-      console.log("ℹ️ [CREATE-DEPARTMENT] No head assigned during creation.");
     }
 
-    // Create department
     const department = await Department.create(payload);
-    console.log("✅ [CREATE-DEPARTMENT] Department created:", department._id);
 
     await department.populate('head', 'firstName lastName email');
 
@@ -128,7 +106,6 @@ exports.createDepartment = async (req, res) => {
       message: 'Department created successfully',
       department
     });
-
   } catch (error) {
     console.error("❌ [CREATE-DEPARTMENT] Error:", error.message);
     res.status(500).json({
@@ -137,7 +114,6 @@ exports.createDepartment = async (req, res) => {
     });
   }
 };
-
 
 // @desc    Update department
 // @route   PUT /api/departments/:id
@@ -165,10 +141,7 @@ exports.updateDepartment = async (req, res) => {
       department
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -186,9 +159,8 @@ exports.deleteDepartment = async (req, res) => {
       });
     }
 
-    // 🔍 Check if any users are assigned to this department
     const employeeCount = await User.countDocuments({
-      department: req.params.id, // no isActive filter → counts all users
+      department: req.params.id,
     });
 
     if (employeeCount > 0) {
@@ -198,7 +170,6 @@ exports.deleteDepartment = async (req, res) => {
       });
     }
 
-    // ❌ Delete the department
     await Department.deleteOne({ _id: req.params.id });
 
     res.status(200).json({
@@ -214,7 +185,9 @@ exports.deleteDepartment = async (req, res) => {
   }
 };
 
-
+// @desc    Toggle department active status
+// @route   PATCH /api/departments/:id/toggle-status
+// @access  Private (HR, Admin)
 exports.toggleDepartmentStatus = async (req, res) => {
   try {
     const department = await Department.findById(req.params.id);
@@ -226,12 +199,11 @@ exports.toggleDepartmentStatus = async (req, res) => {
       });
     }
 
-    // Prevent inactivating a department with employees
     if (!department.isActive) {
-      // Reactivating is allowed always
+      // Reactivating is always allowed
       department.isActive = true;
     } else {
-      // Deactivating → must have 0 employees
+      // Deactivating → check no active employees
       const employeeCount = await User.countDocuments({
         department: req.params.id,
         isActive: true
@@ -254,7 +226,6 @@ exports.toggleDepartmentStatus = async (req, res) => {
       message: `Department ${department.isActive ? 'activated' : 'deactivated'}`,
       department
     });
-
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

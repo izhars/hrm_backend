@@ -1,56 +1,21 @@
-// routes/employeeRoutes.js
-const express = require('express');
-const router = express.Router();
+const express = require('express'); const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
-const { upload } = require('../middleware/upload'); // ✅ Correct Multer instance
-
-const {
-  getAllEmployees,
-  getEmployee,
-  createEmployee,
-  updateEmployee,
-  deleteEmployee,
-  uploadDocument,
-  updateProfilePicture,
-  getAllHRs,
-  getEmployeeLastSeen,
-  toggleHRAvailability, // Keep the toggle API
-  getAvailabilityStatus
-} = require('../controllers/employeeController');
+const { upload } = require('../middleware/upload');
+const c = require('../controllers/employeeController');
 
 router.use(protect);
-router.get('/hr', getAllHRs); // List all HR users
-router.route('/')
-  .get(authorize('hr', 'manager', 'superadmin'), getAllEmployees)   // Managers can view list
-  .post(authorize('hr', 'superadmin'), createEmployee);             // Only HR+ can create
-router.route('/:id')
-  .get(getEmployee)                                                // Any authenticated user can view profile
-  .put(authorize('hr', 'superadmin'), updateEmployee)              // Only HR & Superadmin can edit details
-  .delete(authorize('superadmin'), deleteEmployee);                // Only Superadmin can delete
-router.post(
-  '/:id/documents',
-  authorize('hr', 'superadmin'),
-  upload.single('document'), // Expect form-data key: 'document'
-  uploadDocument
-);
-router.put(
-  '/:id/profile-picture',
-  upload.single('profilePicture'), // Expect form-data key: 'profilePicture'
-  updateProfilePicture
-);
-router.get(
-  '/:id/last-seen',
-  authorize('hr', 'manager', 'superadmin'),
-  getEmployeeLastSeen
-);
 
-router.put('/:id/availability', authorize('hr', 'superadmin'), toggleHRAvailability);
+router.get('/hr', c.getAllHRs);
+router.get('/last-seen', protect, c.getEmployeeList); // moved above
+router.get('/', authorize('hr','manager','superadmin','employee'), c.getAllEmployees);
+router.post('/', authorize('hr','superadmin'), c.createEmployee);
+router.get('/:id', c.getEmployee);
+router.put('/:id', authorize('hr','superadmin'), c.updateEmployee);
+router.delete('/:id', authorize('superadmin'), c.deleteEmployee);
+router.post('/:id/documents', authorize('hr','superadmin'), upload.single('document'), c.uploadDocument);
+router.put('/:id/profile-picture', upload.single('profilePicture'), c.updateProfilePicture);
+router.put('/:id/availability', authorize('hr','superadmin'), c.toggleHRAvailability);
+router.get('/:id/availability-status', authorize('hr','manager','superadmin'), c.getAvailabilityStatus);
 
-router.get(
-  "/:id/availability-status",
-  protect,
-  authorize("hr", "manager", "superadmin"),
-  getAvailabilityStatus
-);
 
 module.exports = router;

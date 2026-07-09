@@ -1,41 +1,40 @@
+// controllers/authController.js
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Department = require('../models/Department');
 const mongoose = require('mongoose');
 const cloudinary = require('../config/cloudinary');
 const fs = require('fs');
-const emailService = require('../utils/emailService'); // adjust path if needed
-const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5000';
+const emailService = require('../utils/emailService');
 const { generateForgotPasswordEmail } = require('../email/forgotPasswordEmail');
+const { uploadToCloudinary, deleteFromCloudinary } = require('../middleware/upload');
+const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5000';
 
 // Generate JWT Token
 const generateToken = (id, role, employeeId) => {
-  const jwt = require('jsonwebtoken');
   return jwt.sign(
     { id, role, employeeId },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRE || '30d' }
   );
 };
+
 // @desc    Register new user
 // @route   POST /api/auth/register
-// @access  Private
+// @access  Private (HR, Superadmin, Manager)
 exports.register = async (req, res) => {
   try {
-    console.log('=== Registration Attempt ===');
-    console.log('Performed by:', req.user?.role, req.user?._id);
-    console.log('Role input:', req.body.role);
-    console.log('Reporting Manager input:', req.body.reportingManager);
-
     const {
-      employeeId, email, password, firstName, lastName, role, department,
-      designation, dateOfJoining, employmentType, reportingManager,
-      salary, bankDetails, phone, gender, dateOfBirth, maritalStatus,
-      marriageAnniversary, spouseDetails, bloodGroup, address,
-      emergencyContact, panNumber, pfNumber, uanNumber, documents,
-      profilePicture, weekendType // ✅ added
+      employeeId, email, password, firstName, lastName, role,
+      department, designation, dateOfJoining, employmentType,
+      reportingManager, salary, bankDetails, phone, gender,
+      dateOfBirth, maritalStatus, marriageAnniversary,
+      spouseDetails, bloodGroup, address, emergencyContact,
+      panNumber, pfNumber, uanNumber, documents, profilePicture,
+      weekendType
     } = req.body;
 
-    // Input validation
+    // Required fields validation
     if (!employeeId || !email || !password || !firstName || !lastName || !department) {
       return res.status(400).json({
         success: false,
@@ -43,25 +42,17 @@ exports.register = async (req, res) => {
       });
     }
 
-    // Role-based restrictions
+    // Role-based creation permissions
     const allowedRoles = {
       superadmin: ['hr', 'manager', 'employee'],
-      hr: ['employee', 'manager'], // HR can create managers too
-      manager: ['employee'],
-      employee: []
+      hr: ['manager', 'employee'],
+      manager: ['employee']
     };
 
     const userRole = req.user?.role;
     const assignedRole = role || 'employee';
 
-    if (!userRole) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-
-    if (!allowedRoles[userRole]?.includes(assignedRole)) {
+    if (!userRole || !allowedRoles[userRole]?.includes(assignedRole)) {
       return res.status(403).json({
         success: false,
         message: `${userRole.charAt(0).toUpperCase() + userRole.slice(1)} can only create ${allowedRoles[userRole]?.join(', ') || 'no roles'} accounts`
@@ -69,157 +60,66 @@ exports.register = async (req, res) => {
     }
 
     // Check for existing user
-    const existingUser = await User.findOne({
-      $or: [{ email }, { employeeId }]
-    }).select('email employeeId');
-
+    const existingUser = await User.findOne({ $or: [{ email }, { employeeId }] });
     if (existingUser) {
       return res.status(400).json({
         success: false,
-        message: existingUser.email === email
-          ? 'Email already registered'
-          : 'Employee ID already exists'
+        message: existingUser.email === email ? 'Email already registered' : 'Employee ID already exists'
       });
     }
 
-    // Department handling (your existing logic)
-    let departmentId = null;
-    let departmentName = null;
+    // Department handling
+    let departmentId;
+    let deptDoc = await Department.findOne({
+      name: { $regex: new RegExp(`^${department.trim()}$`, 'i') }
+    });
 
-    let deptDoc = null;
-    try {
-      deptDoc = await Department.findOne({
-        name: { $regex: new RegExp(`^${department.trim()}$`, 'i') }
-      });
+    if (!deptDoc) {
+      const code = department
+        .split(' ')
+        .map(word => word[0])
+        .join('')
+        .toUpperCase()
+        .substring(0, 4);
 
-      if (!deptDoc) {
-        const code = department
-          .split(' ')
-          .map(word => word[0])
-          .join('')
-          .toUpperCase()
-          .substring(0, 4);
-
-        deptDoc = new Department({
-          name: department.trim(),
-          code,
-          head: req.user._id
-        });
-
-        await deptDoc.save();
-      }
-
-      if (deptDoc && deptDoc._id) {
-        departmentId = deptDoc._id;
-
-        if (!mongoose.Types.ObjectId.isValid(departmentId)) {
-          return res.status(500).json({
-            success: false,
-            message: 'Department ObjectId validation failed'
-          });
-        }
-
-        departmentName = deptDoc.name;
-      } else {
-        throw new Error('Department document missing _id');
-      }
-
-    } catch (deptError) {
-      console.error('Department processing error:', deptError);
-      return res.status(500).json({
-        success: false,
-        message: `Department processing failed: ${deptError.message}`
+      deptDoc = await Department.create({
+        name: department.trim(),
+        code,
+        head: req.user._id
       });
     }
+    departmentId = deptDoc._id;
 
-    // **UPDATED REPORTING MANAGER LOGIC** 
+    // Reporting manager logic
     let reportingManagerId = null;
-
-    console.log('Processing reporting manager for role:', assignedRole);
-    console.log('Raw reportingManager input:', reportingManager);
-
-    // **Business Logic: Managers don't have reporting managers by default**
-    if (assignedRole === 'manager') {
-      console.log('Role is manager - setting reportingManager to null');
-      reportingManagerId = null;
-    }
-    // **Only process reporting manager for employees**
-    else if (assignedRole === 'employee' && reportingManager) {
+    if (assignedRole === 'employee' && reportingManager) {
       const trimmedManagerId = reportingManager.trim();
 
-      // Skip if explicitly set to "NA" or empty
-      if (trimmedManagerId === 'NA' || trimmedManagerId === '') {
-        console.log('Reporting manager set to NA or empty - using null');
-        reportingManagerId = null;
-      }
-      // Process valid manager ID
-      else if (mongoose.Types.ObjectId.isValid(trimmedManagerId)) {
-        try {
-          const objectId = new mongoose.Types.ObjectId(trimmedManagerId);
-
-          // Verify the manager exists and has appropriate role
+      if (trimmedManagerId !== 'NA' && trimmedManagerId !== '') {
+        if (mongoose.Types.ObjectId.isValid(trimmedManagerId)) {
           const manager = await User.findOne({
-            _id: objectId,
+            _id: trimmedManagerId,
             isActive: true,
             role: { $in: ['superadmin', 'hr', 'manager'] }
           });
-
-          if (manager) {
-            reportingManagerId = objectId;
-            console.log('Valid reporting manager assigned:', reportingManagerId);
-          } else {
-            console.warn('Manager not found or inactive, setting to null');
-            reportingManagerId = null;
-          }
-        } catch (managerError) {
-          console.error('Reporting manager validation error:', managerError);
-          reportingManagerId = null;
-        }
-      }
-      // Try to find by employee ID if not ObjectId format
-      else {
-        try {
+          if (manager) reportingManagerId = trimmedManagerId;
+        } else {
           const manager = await User.findOne({
             employeeId: trimmedManagerId,
             isActive: true,
             role: { $in: ['superadmin', 'hr', 'manager'] }
           });
-
-          if (manager) {
-            reportingManagerId = manager._id;
-            console.log('Manager found by employeeId:', reportingManagerId);
-          } else {
-            console.warn('Manager not found by employeeId, setting to null');
-            reportingManagerId = null;
-          }
-        } catch (error) {
-          console.error('Manager lookup by employeeId failed:', error);
-          reportingManagerId = null;
+          if (manager) reportingManagerId = manager._id;
         }
       }
-    } else {
-      console.log('No reporting manager processing needed - using null');
-      reportingManagerId = null;
     }
 
-    // Prepare other data
-    const salaryData = salary || { basic: 0, hra: 0, transport: 0, allowances: 0, deductions: 0 };
-    const finalMaritalStatus = maritalStatus || 'single';
-    const finalMarriageAnniversary = finalMaritalStatus === 'married' ? marriageAnniversary : undefined;
-    const finalSpouseDetails = finalMaritalStatus === 'married' ? (spouseDetails || {}) : {};
-
-    // Final validation
-    console.log('Final assignment:');
-    console.log('- Role:', assignedRole);
-    console.log('- departmentId:', departmentId, 'Valid:', mongoose.Types.ObjectId.isValid(departmentId));
-    console.log('- reportingManagerId:', reportingManagerId, 'Valid:', reportingManagerId ? mongoose.Types.ObjectId.isValid(reportingManagerId) : 'null (as expected)');
-
-    // Probation Logic
+    // Probation setup
     const probationStart = dateOfJoining ? new Date(dateOfJoining) : new Date();
     const probationEnd = new Date(probationStart);
     probationEnd.setMonth(probationEnd.getMonth() + 6);
 
-    // Create user data object
+    // Prepare user data
     const userData = {
       employeeId: employeeId.trim().toUpperCase(),
       email: email.toLowerCase().trim(),
@@ -231,17 +131,23 @@ exports.register = async (req, res) => {
       designation: designation ? designation.trim() : '',
       dateOfJoining: dateOfJoining ? new Date(dateOfJoining) : new Date(),
       employmentType: employmentType || 'full-time',
-      reportingManager: reportingManagerId, // null for managers, null/ObjectId for employees
-      salary: salaryData,
+      reportingManager: reportingManagerId,
+      salary: salary || { basic: 0, hra: 0, transport: 0, allowances: 0, deductions: 0 },
       bankDetails: bankDetails || {},
       phone: phone ? phone.trim() : '',
       gender,
       dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined,
-      maritalStatus: finalMaritalStatus,
-      marriageAnniversary: finalMarriageAnniversary,
-      spouseDetails: finalSpouseDetails,
+      maritalStatus: maritalStatus || 'single',
+      marriageAnniversary: maritalStatus === 'married' ? marriageAnniversary : undefined,
+      spouseDetails: maritalStatus === 'married' ? (spouseDetails || {}) : {},
       bloodGroup: bloodGroup || null,
-      address: address || {},
+      address: {
+        street: address?.street || '',
+        city: address?.city || '',
+        state: address?.state || '',
+        country: address?.country || 'India',
+        postalCode: address?.postalCode || ''
+      },
       emergencyContact: emergencyContact || {},
       panNumber: panNumber ? panNumber.toUpperCase().trim() : '',
       pfNumber: pfNumber ? pfNumber.trim() : '',
@@ -251,11 +157,9 @@ exports.register = async (req, res) => {
       createdBy: req.user._id,
       isVerified: userRole === 'superadmin',
       weekendType: weekendType || 'sunday',
-      // 🔥 Probation Fields Added Here
       probationStartDate: probationStart,
       probationEndDate: probationEnd,
       isProbationCompleted: false,
-      // 🔥 Force ZERO Paid Leaves During Probation
       leaveBalance: {
         casual: 0,
         sick: 0,
@@ -264,26 +168,19 @@ exports.register = async (req, res) => {
       }
     };
 
-    console.log('Creating user with role-based reporting logic...');
-
-    // Create and save user
     const user = new User(userData);
     await user.save();
 
-    console.log('User successfully created:', user._id, user.employeeId, 'Role:', user.role, 'ReportingManager:', user.reportingManager);
-
-    // 🔥 NEW: Send welcome email with login credentials
+    // Send welcome email (non-blocking)
     try {
       if (['hr', 'superadmin'].includes(userRole)) {
         await emailService.sendWelcomeEmail(user, password);
-        console.log('Welcome email sent successfully to:', user.email);
       }
     } catch (emailError) {
       console.error('Failed to send welcome email:', emailError);
-      // Don't fail the registration if email fails, just log it
     }
 
-    // Calculate net salary
+    // Calculate net salary if applicable
     try {
       if (typeof user.calculateNetSalary === 'function') {
         user.calculateNetSalary();
@@ -295,7 +192,6 @@ exports.register = async (req, res) => {
 
     const token = generateToken(user._id, user.role, user.employeeId);
 
-    // Get populated user data for response
     const populatedUser = await User.findById(user._id)
       .populate('department', 'name')
       .populate('reportingManager', 'firstName lastName employeeId')
@@ -311,7 +207,7 @@ exports.register = async (req, res) => {
         fullName: user.fullName,
         email: user.email,
         role: user.role,
-        department: populatedUser.department?.name || departmentName,
+        department: populatedUser.department?.name,
         designation: user.designation,
         employmentType: user.employmentType,
         reportingManager: populatedUser.reportingManager ?
@@ -322,10 +218,9 @@ exports.register = async (req, res) => {
         dateOfJoining: user.dateOfJoining,
         salary: user.salary?.netSalary || 0,
         isActive: user.isActive,
-        weekendType: user.weekendType // ✅ added
+        weekendType: user.weekendType
       }
     });
-
   } catch (error) {
     console.error('=== REGISTRATION ERROR ===', error);
 
@@ -341,7 +236,7 @@ exports.register = async (req, res) => {
       });
     }
 
-    if (error.name === 'MongoError' && error.code === 11000) {
+    if (error.code === 11000) {
       return res.status(400).json({
         success: false,
         message: 'Duplicate entry: Email or Employee ID already exists'
@@ -355,35 +250,6 @@ exports.register = async (req, res) => {
   }
 };
 
-// controllers/userController.js
-exports.resetDevice = async (req, res) => {
-  try {
-    const { userId } = req.params;
-
-    // Only HR or superadmin should be allowed
-    if (!['hr', 'superadmin'].includes(req.user.role)) {
-      return res.status(403).json({ success: false, message: 'Not authorized' });
-    }
-
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-
-    user.deviceId = null;
-    await user.save({ validateBeforeSave: false });
-
-    res.status(200).json({
-      success: true,
-      message: `Device reset for ${user.firstName} ${user.lastName} (${user.employeeId}).`
-    });
-  } catch (error) {
-    console.error('Device reset error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-};
-
-
 // @desc    Login user
 // @route   POST /api/auth/login
 // @access  Public
@@ -391,10 +257,7 @@ exports.login = async (req, res) => {
   try {
     const { email, password, deviceId, fcmToken } = req.body;
 
-    console.log("🟦 Login Attempt:", { email, password, deviceId, fcmToken });
-
     if (!email || !password) {
-      console.log("🟨 Missing credentials");
       return res.status(400).json({
         success: false,
         message: 'Please provide email and password'
@@ -406,19 +269,7 @@ exports.login = async (req, res) => {
       .populate('department', 'name code')
       .populate('reportingManager', 'firstName lastName email');
 
-    if (!user) {
-      console.log("🔴 User not found:", email);
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials'
-      });
-    }
-
-    console.log("🟦 User found:", { userId: user._id, deviceId: user.deviceId });
-
-    const isMatch = await user.matchPassword(password);
-    if (!isMatch) {
-      console.log("🔴 Wrong password entered for:", email);
+    if (!user || !(await user.matchPassword(password))) {
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
@@ -426,7 +277,6 @@ exports.login = async (req, res) => {
     }
 
     if (!user.isActive) {
-      console.log("🟥 Account inactive:", user._id);
       return res.status(403).json({
         success: false,
         message: 'Account is deactivated. Please contact HR.'
@@ -434,40 +284,27 @@ exports.login = async (req, res) => {
     }
 
     if (!user.isVerified) {
-      console.log("🟥 Account not verified:", user._id);
       return res.status(403).json({
         success: false,
         message: 'Account is not verified. Please verify your account before logging in.'
       });
     }
 
-    // Device restriction logs
+    // Device restriction
     if (user.deviceId && user.deviceId !== deviceId) {
-      console.log("🚫 Device Mismatch!", {
-        userDevice: user.deviceId,
-        incomingDevice: deviceId
-      });
       return res.status(403).json({
         success: false,
-        message:
-          'Login denied: You are already logged in on another device. Please contact HR or logout from that device first.',
+        message: 'Login denied: You are already logged in on another device. Please contact HR or logout from that device first.'
       });
     }
 
-    if (!user.deviceId && deviceId) {
-      user.deviceId = deviceId;
-    }
-
+    // Update device & login info
+    if (deviceId) user.deviceId = deviceId;
+    if (fcmToken) user.fcmToken = fcmToken;
     user.lastLogin = new Date();
     user.lastLoginDevice = deviceId || null;
-
-    // 🔔 FCM TOKEN SAVE
-    if (fcmToken) {
-      user.fcmToken = fcmToken;
-    }
-
     await user.save({ validateBeforeSave: false });
-    console.log("🟢 Login successful:", { userId: user._id });
+
     const token = generateToken(user._id, user.role, user.employeeId);
 
     res.status(200).json({
@@ -489,43 +326,9 @@ exports.login = async (req, res) => {
         deviceId: user.deviceId,
       },
     });
-
   } catch (error) {
     console.error("🔥 [Login Error]:", error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error during login',
-    });
-  }
-};
-
-
-exports.getManagers = async (req, res) => {
-  try {
-    const managers = await User.find({ role: 'manager', isActive: true })
-      .select('employeeId firstName lastName email department designation')
-      .populate('department', 'name code') // show department details
-      .sort({ firstName: 1 });
-
-    if (!managers.length) {
-      return res.status(404).json({
-        success: false,
-        message: 'No managers found',
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      count: managers.length,
-      data: managers,
-    });
-  } catch (error) {
-    console.error('Error fetching managers:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server Error',
-      error: error.message,
-    });
+    res.status(500).json({ success: false, message: 'Server error during login' });
   }
 };
 
@@ -540,22 +343,13 @@ exports.getMe = async (req, res) => {
       .populate('createdBy', 'firstName lastName');
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    res.status(200).json({
-      success: true,
-      user
-    });
+    res.status(200).json({ success: true, user });
   } catch (error) {
     console.error('Get me error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -564,135 +358,179 @@ exports.getMe = async (req, res) => {
 // @access  Private
 exports.updateProfile = async (req, res) => {
   try {
-    const excludedFields = ['role', 'isActive', 'isVerified', 'employeeId', 'email', 'createdBy', 'department'];
+    // Fields users cannot update directly
+    const forbiddenFields = [
+      'role',
+      'isActive',
+      'isVerified',
+      'employeeId',
+      'email',
+      'createdBy',
+      'department',
+      'probationStartDate',
+      'probationEndDate',
+      'isProbationCompleted',
+      'leaveBalance',
+      'designation',
+      'weekendType',
+    ];
+
     const updates = { ...req.body };
 
-    excludedFields.forEach(field => delete updates[field]);
+    // Remove forbidden fields
+    forbiddenFields.forEach((field) => delete updates[field]);
 
-    // Handle marital status change
-    if (updates.maritalStatus) {
+    // Handle marital status logic
+    if ('maritalStatus' in updates) {
       if (updates.maritalStatus === 'married') {
         if (!updates.marriageAnniversary) {
           return res.status(400).json({
             success: false,
-            message: 'Marriage anniversary is required for married status'
+            message: 'Marriage anniversary date is required for married status',
           });
         }
         updates.spouseDetails = updates.spouseDetails || {};
       } else {
-        // Clear marriage-related fields for non-married status
         updates.marriageAnniversary = undefined;
         updates.spouseDetails = {};
       }
     }
 
-    const user = await User.findByIdAndUpdate(
-      req.user.id,
-      updates,
-      {
-        new: true,
-        runValidators: true,
-        select: '-password -resetPasswordToken -resetPasswordExpire'
-      }
-    ).populate('department reportingManager');
+    // Find user and store old data for logging
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    // Recalculate salary if needed
-    if (req.body.salary) {
-      user.salary = { ...user.salary, ...req.body.salary };
+    const oldData = user.toObject();
+
+    // Update user
+    Object.assign(user, updates);
+
+    // Recalculate net salary if salary updated
+    if (req.body.salary && typeof user.calculateNetSalary === 'function') {
+      Object.assign(user.salary, req.body.salary);
       user.calculateNetSalary();
-      await user.save();
+    }
+
+    await user.save();
+
+    // Log changes
+    const changedFields = {};
+    Object.keys(updates).forEach((key) => {
+      if (JSON.stringify(oldData[key]) !== JSON.stringify(updates[key])) {
+        changedFields[key] = { before: oldData[key], after: updates[key] };
+      }
+    });
+
+    if (Object.keys(changedFields).length > 0) {
+      await ProfileLog.create({
+        user: user._id,
+        changedBy: req.user.id,
+        changes: changedFields,
+        updatedAt: new Date(),
+      });
     }
 
     res.status(200).json({
       success: true,
+      message: 'Profile updated successfully',
       user: {
         ...user.toObject(),
-        daysToAnniversary: user.daysToAnniversary
-      }
+        daysToAnniversary: user.daysToAnniversary,
+      },
     });
-
   } catch (error) {
     console.error('Update profile error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    if (error.name === 'ValidationError') {
+      const errors = Object.values(error.errors).reduce((acc, err) => {
+        acc[err.path] = err.message;
+        return acc;
+      }, {});
+      return res.status(400).json({ success: false, message: 'Validation error', errors });
+    }
+    res.status(500).json({ success: false, message: 'Failed to update profile' });
   }
 };
 
+
+// @desc    Update profile picture
+// @route   PUT /api/auth/profile-picture
+// @access  Private
 exports.updateProfilePicture = async (req, res) => {
   try {
+    console.log('📸 Update profile picture called');
+
+    // 1️⃣ File validation
     if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No file uploaded or invalid file type'
-      });
+      console.log('❌ No file received');
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
     }
 
-    // Check if file is actually an image (additional security)
+    console.log('📁 File info:', {
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      size: req.file.size
+    });
+
     if (!req.file.mimetype.startsWith('image/')) {
-      // Delete the uploaded file if it's not an image
-      fs.unlinkSync(req.file.path);
+      console.log('❌ Invalid file type:', req.file.mimetype);
       return res.status(400).json({
         success: false,
         message: 'Only image files are allowed'
       });
     }
 
-    // Upload file to Cloudinary
-    const result = await cloudinary.uploader.upload(req.file.path, {
-      folder: 'profile_pictures',
-      resource_type: 'image',
-      transformation: [
-        { width: 300, height: 300, crop: 'fill', gravity: 'face' }
-      ]
+    // 2️⃣ Upload new image
+    console.log('⬆️ Uploading image to Cloudinary...');
+    const result = await uploadToCloudinary(req.file.buffer, 'profile');
+
+    console.log('✅ Upload success:', {
+      url: result.url,
+      publicId: result.publicId
     });
 
-    // Delete the local file after uploading
-    fs.unlinkSync(req.file.path);
-
-    // Update user profile picture in DB
+    // 3️⃣ Fetch user
+    console.log('🔍 Fetching user:', req.user.id);
     const user = await User.findById(req.user.id);
+
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+      console.log('❌ User not found');
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // Delete old profile picture from Cloudinary if it exists
-    if (user.profilePicture && user.profilePicture.includes('cloudinary')) {
-      const publicId = user.profilePicture.split('/').pop().split('.')[0];
-      await cloudinary.uploader.destroy(`profile_pictures/${publicId}`);
+    console.log('👤 Current user image:', {
+      profilePicture: user.profilePicture,
+      profilePicturePublicId: user.profilePicturePublicId
+    });
+
+    // 4️⃣ Delete old image (if exists)
+    if (user.profilePicturePublicId) {
+      console.log('🗑️ Deleting old image from Cloudinary:', user.profilePicturePublicId);
+
+      const deleteRes = await deleteFromCloudinary(
+        user.profilePicturePublicId
+      );
+
+      console.log('🧨 Cloudinary delete response:', deleteRes);
+    } else {
+      console.log('ℹ️ No old profile picture to delete');
     }
 
-    user.profilePicture = result.secure_url;
+    // 5️⃣ Save new image
+    user.profilePicture = result.url;
+    user.profilePicturePublicId = result.publicId;
+
     await user.save({ validateBeforeSave: false });
+
+    console.log('💾 User updated successfully');
 
     res.status(200).json({
       success: true,
       message: 'Profile picture updated successfully',
-      user: {
-        id: user._id,
-        fullName: user.fullName,
-        email: user.email,
-        profilePicture: user.profilePicture,
-        // Include other necessary user fields
-        designation: user.designation,
-        department: user.department,
-      },
+      profilePicture: user.profilePicture
     });
   } catch (error) {
-    // Clean up uploaded file if error occurs
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
-
-    console.error('Update profile picture error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error while updating profile picture',
-    });
+    console.error('🔥 Update profile picture ERROR:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
@@ -705,46 +543,27 @@ exports.changePassword = async (req, res) => {
     const { currentPassword, newPassword } = req.body;
 
     if (!currentPassword || !newPassword) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide current and new password'
-      });
+      return res.status(400).json({ success: false, message: 'Current and new password required' });
     }
 
     if (newPassword.length < 8) {
-      return res.status(400).json({
-        success: false,
-        message: 'New password must be at least 8 characters'
-      });
+      return res.status(400).json({ success: false, message: 'New password must be at least 8 characters' });
     }
 
     const user = await User.findById(req.user.id).select('+password');
-
-    const isMatch = await user.matchPassword(currentPassword);
-    if (!isMatch) {
-      return res.status(401).json({
-        success: false,
-        message: 'Current password is incorrect'
-      });
+    if (!(await user.matchPassword(currentPassword))) {
+      return res.status(401).json({ success: false, message: 'Current password is incorrect' });
     }
 
     user.password = newPassword;
     await user.save();
 
-    res.status(200).json({
-      success: true,
-      message: 'Password changed successfully'
-    });
-
+    res.status(200).json({ success: true, message: 'Password changed successfully' });
   } catch (error) {
     console.error('Change password error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
-
 
 // @desc    Forgot password
 // @route   POST /api/auth/forgot-password
@@ -752,87 +571,48 @@ exports.changePassword = async (req, res) => {
 exports.forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
-
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: 'Please provide an email'
-      });
-    }
+    if (!email) return res.status(400).json({ success: false, message: 'Email required' });
 
     const user = await User.findOne({ email }).select('+resetPasswordToken +resetPasswordExpire');
+    if (!user) return res.status(404).json({ success: false, message: 'No user found with that email' });
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'No user found with that email'
-      });
-    }
-
-    // Generate token
     const resetToken = user.getResetPasswordToken();
     await user.save({ validateBeforeSave: false });
 
-    // Create reset URL
     const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
-    console.log('Password reset URL:', resetUrl);
-
-    // Generate HTML email
     const html = generateForgotPasswordEmail(resetUrl);
 
     try {
-      // Send email
       await emailService.sendEmail({
         to: user.email,
         subject: 'HRMS Password Reset',
         html
       });
-
-      res.status(200).json({
-        success: true,
-        message: 'Password reset email sent successfully'
-      });
+      res.status(200).json({ success: true, message: 'Password reset email sent' });
     } catch (err) {
-      console.error('Email send failed:', err);
-      // Reset token if email failed
       user.resetPasswordToken = undefined;
       user.resetPasswordExpire = undefined;
       await user.save({ validateBeforeSave: false });
-
-      return res.status(500).json({
-        success: false,
-        message: 'Email could not be sent. Please try again later.'
-      });
+      return res.status(500).json({ success: false, message: 'Email could not be sent' });
     }
-
   } catch (error) {
     console.error('Forgot password error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
-
-
 // @desc    Reset password
-// @route   PUT /api/auth/reset-password/:resettoken
+// @route   PUT /api/auth/reset-password/:token
 // @access  Public
 exports.resetPassword = async (req, res) => {
   try {
-    const resetPasswordToken = req.params.token; // FIXED NAME
-
     const user = await User.findOne({
-      resetPasswordToken,
+      resetPasswordToken: req.params.token,
       resetPasswordExpire: { $gt: Date.now() }
     }).select('+password');
 
     if (!user) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid or expired reset token'
-      });
+      return res.status(400).json({ success: false, message: 'Invalid or expired reset token' });
     }
 
     user.password = req.body.password;
@@ -840,102 +620,252 @@ exports.resetPassword = async (req, res) => {
     user.resetPasswordExpire = undefined;
     await user.save();
 
-    res.status(200).json({
-      success: true,
-      message: 'Password reset successful'
-    });
+    res.status(200).json({ success: true, message: 'Password reset successful' });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// Mark a user as unverified (HR only)
-// Set user verification status (HR only)
+// @desc    Reset device ID (HR/Superadmin only)
+// @route   PATCH /api/users/:userId/reset-device
+// @access  Private (HR, Superadmin)
+exports.resetDevice = async (req, res) => {
+  try {
+    if (!['hr', 'superadmin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    const user = await User.findById(req.params.userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    user.deviceId = null;
+    await user.save({ validateBeforeSave: false });
+
+    res.status(200).json({
+      success: true,
+      message: `Device reset for ${user.firstName} ${user.lastName} (${user.employeeId})`
+    });
+  } catch (error) {
+    console.error('Device reset error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// @desc    Get managers list
+// @route   GET /api/users/managers
+// @access  Private
+exports.getManagers = async (req, res) => {
+  try {
+    const managers = await User.find({ role: 'manager', isActive: true })
+      .select('employeeId firstName lastName email department designation')
+      .populate('department', 'name code')
+      .sort({ firstName: 1 });
+
+    res.status(200).json({
+      success: true,
+      count: managers.length,
+      data: managers
+    });
+  } catch (error) {
+    console.error('Error fetching managers:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// @desc    Set user verification status (HR/Superadmin only)
+// @route   PATCH /api/users/:userId/verification
+// @access  Private
 exports.setVerification = async (req, res) => {
   try {
-    const { userId } = req.params;
-    const { isVerified } = req.body; // true or false
+    if (!['hr', 'superadmin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
 
+    const { isVerified } = req.body;
     if (typeof isVerified !== 'boolean') {
-      return res.status(400).json({
-        success: false,
-        message: 'isVerified (boolean) is required in body',
-      });
+      return res.status(400).json({ success: false, message: 'isVerified (boolean) required' });
     }
 
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found',
-      });
-    }
+    const user = await User.findById(req.params.userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
     user.isVerified = isVerified;
     await user.save({ validateBeforeSave: false });
 
-    console.log(
-      `🟠 [HR Action] User verification set to ${isVerified} for ${user.email} by ${req.user.email}`
-    );
-
     res.status(200).json({
       success: true,
       message: `User ${user.fullName} is now ${isVerified ? 'verified' : 'unverified'}`,
-      user: {
-        id: user._id,
-        email: user.email,
-        fullName: user.fullName,
-        isVerified: user.isVerified,
-      },
+      isVerified
     });
   } catch (error) {
-    console.error('🔴 [Set Verification Error]:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error while updating verification',
-    });
+    console.error('Set verification error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
-// Check if logged-in user is verified (for app access)
+// @desc    Check if current user is verified
+// @route   GET /api/auth/verify-status
+// @access  Private
 exports.checkVerification = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('isVerified fullName email role');
+   
+    const incomingDeviceId = req.headers['device-id'] || req.body.deviceId;
+    const userId = req.user.id;
 
-    if (!user) {
-      return res.status(404).json({
+    console.log('📥 [VERIFY] Incoming data:', {
+      userId,
+      incomingDeviceId,
+      ip: req.ip
+    });
+
+    // Validation
+    if (!incomingDeviceId) {
+      console.warn('⚠️ [VERIFY] Missing device ID');
+
+      return res.status(400).json({
         success: false,
-        message: 'User not found',
+        message: 'Device ID is required for verification'
       });
     }
 
+    // Find user
+    const user = await User.findById(userId)
+      .select('+isVerified +deviceId +lastLoginDevice +lastLogin +isActive +loginAttempts +accountStatus')
+      .lean();
+
+    if (!user) {
+      console.error('❌ [VERIFY] User not found:', userId);
+
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Account deactivated
+    if (!user.isActive) {
+      
+      return res.status(403).json({
+        success: false,
+        message: 'Account is deactivated. Please contact HR.',
+        isVerified: false,
+        reason: 'ACCOUNT_DEACTIVATED'
+      });
+    }
+
+    // Account unverified
     if (!user.isVerified) {
-      console.warn(`🔴 [Access Denied] ${user.email} (${user.role}) is not verified.`);
+      
+      await User.findByIdAndUpdate(userId, {
+        $inc: { loginAttempts: 1 },
+        $set: { lastVerificationCheck: new Date() }
+      });
+
       return res.status(403).json({
         success: false,
         message: 'Your account has been unverified by HR. Please contact HR.',
         isVerified: false,
+        reason: 'UNVERIFIED_ACCOUNT'
       });
     }
 
-    res.status(200).json({
+    // Device verification
+    if (user.deviceId) {
+      if (user.deviceId !== incomingDeviceId) {
+        console.warn('📱 [VERIFY] Device mismatch detected', {
+          userId,
+          stored: user.deviceId,
+          incoming: incomingDeviceId
+        });
+
+        await User.findByIdAndUpdate(userId, {
+          $inc: { loginAttempts: 1 },
+          $push: {
+            securityLogs: {
+              type: 'DEVICE_MISMATCH',
+              deviceId: incomingDeviceId,
+              timestamp: new Date(),
+              ip: req.ip
+            }
+          }
+        });
+
+        if (user.loginAttempts >= 5) {
+          console.error('🔒 [VERIFY] Account locked due to repeated mismatches:', userId);
+
+          await User.findByIdAndUpdate(userId, {
+            $set: { isActive: false, accountStatus: 'LOCKED' }
+          });
+
+          return res.status(403).json({
+            success: false,
+            message: 'Account locked due to suspicious activity. Contact HR.',
+            isVerified: false,
+            reason: 'ACCOUNT_LOCKED'
+          });
+        }
+
+        return res.status(401).json({
+          success: false,
+          message: 'Login detected from new device. Please login again.',
+          isVerified: true,
+          reason: 'DEVICE_MISMATCH'
+        });
+      }
+    } else {
+      console.log('🆕 [VERIFY] First login detected, saving device info');
+
+      await User.findByIdAndUpdate(userId, {
+        $set: {
+          deviceId: incomingDeviceId,
+          lastLoginDevice: incomingDeviceId,
+          lastLogin: new Date(),
+          loginAttempts: 0
+        },
+        $push: {
+          deviceHistory: {
+            deviceId: incomingDeviceId,
+            firstLogin: new Date(),
+            ip: req.ip
+          }
+        }
+      });
+    }
+
+    // Update last activity
+    await User.findByIdAndUpdate(userId, {
+      $set: { lastActivity: new Date() },
+      $inc: { loginAttempts: -1 }
+    });
+
+    console.log('✅ [VERIFY] User verified successfully:', userId);
+
+    return res.status(200).json({
       success: true,
-      message: 'User is verified',
+      message: 'User verified successfully',
       isVerified: true,
       user: {
+        id: user._id,
         fullName: user.fullName,
         email: user.email,
         role: user.role,
+        profilePicture: user.profilePicture,
+        department: user.department,
+        designation: user.designation
       },
+      deviceMatched: true,
+      lastLogin: user.lastLogin
     });
+
   } catch (error) {
-    console.error('🔴 [Check Verification Error]:', error);
-    res.status(500).json({
+    console.error('💥 [VERIFY] Fatal error during verification:', error);
+
+    return res.status(500).json({
       success: false,
-      message: 'Server error while checking verification',
+      message: 'Internal server error during verification',
+      isVerified: false
     });
   }
 };
+
+

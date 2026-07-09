@@ -33,7 +33,6 @@ exports.verifyEmailConfig = async () => {
   try {
     const transport = initializeTransporter();
     await transport.verify();
-    console.log("✅ Email transporter verified");
     return true;
   } catch (error) {
     console.error("❌ Email transporter verification failed:", error.message);
@@ -86,7 +85,6 @@ exports.sendEmail = async ({ to, subject, html, text, attachments = [] }) => {
 
     const info = await transport.sendMail(mailOptions);
 
-    console.log(`📩 Email sent to ${to}: ${info.messageId}`);
     return {
       success: true,
       messageId: info.messageId,
@@ -147,10 +145,8 @@ exports.loadTemplate = async (fileName, data = {}) => {
       return compiled(data);
     }
 
-    // Updated path to src/email
-    const emailDir = path.join(__dirname, "../email"); // __dirname is src/utils, so go up two levels to src
-    
-    // Check if email directory exists
+    const emailDir = path.join(__dirname, "../email");
+
     try {
       await fs.access(emailDir);
     } catch (dirError) {
@@ -160,7 +156,6 @@ exports.loadTemplate = async (fileName, data = {}) => {
 
     const filePath = path.join(emailDir, fileName);
     
-    // Check if template file exists
     try {
       await fs.access(filePath);
     } catch (fileError) {
@@ -232,19 +227,13 @@ exports.sendBulkEmail = async (emails, subject, html, options = {}) => {
     }
   }
 
-  const result = {
+  return {
     total: emails.length,
     success: successCount,
     failed: failedEmails.length,
     failedEmails,
     percentage: ((successCount / emails.length) * 100).toFixed(1),
   };
-
-  console.log(
-    `📊 Bulk email complete: ${result.percentage}% success (${successCount}/${emails.length})`
-  );
-
-  return result;
 };
 
 // =============================================
@@ -346,7 +335,6 @@ exports.createAttachment = (filePath, options = {}) => ({
 // =============================================
 exports.clearTemplateCache = () => {
   templateCache.clear();
-  console.log("🗑️ Template cache cleared");
 };
 
 exports.getEmailStats = async () => {

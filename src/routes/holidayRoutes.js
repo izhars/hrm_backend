@@ -6,7 +6,7 @@ const validateObjectId = require('../middleware/validateObjectId');
 const validateHolidayInput = require('../middleware/validateHolidayInput');
 
 // ✅ Reuse your centralized upload middleware instead of redefining multer
-const { upload } = require('../middleware/upload');
+const { bulkUpload } = require('../middleware/upload');
 
 const {
   addHoliday,
@@ -39,13 +39,7 @@ router.put('/:id', authorize('hr', 'superadmin'), validateObjectId, validateHoli
 router.delete('/:id', authorize('hr', 'superadmin'), validateObjectId, deleteHoliday);
 
 // ========== BULK IMPORT (HR & Superadmin) ==========
-router.post(
-  '/bulk-import',
-  authorize('hr', 'superadmin'),
-  // Reuse shared upload config + enforce CSV/JSON only
-  upload.single('file'),
-  bulkImportHolidays
-);
+router.post('/bulk-import', authorize('hr', 'superadmin'), bulkUpload.single('file'),bulkImportHolidays);
 
 // ========== SUPERADMIN ONLY ==========
 router.delete('/:id/permanent', authorize('superadmin'), validateObjectId, permanentDeleteHoliday);

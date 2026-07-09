@@ -1,18 +1,14 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Token = require('../models/Token');
 
-// ----------------------
-// 🔒 Protect Middleware
-// ----------------------
 exports.protect = async (req, res, next) => {
   let token;
 
-  // ✅ Get token from header
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
     token = req.headers.authorization.split(' ')[1];
   }
 
-  // ❌ If no token found
   if (!token) {
     return res.status(401).json({
       success: false,
@@ -21,20 +17,39 @@ exports.protect = async (req, res, next) => {
   }
 
   try {
-    // ✅ Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = await User.findById(decoded.id).select('-password');
 
-    // 🪶 Debug log
-    console.log('----------------------------------------');
-    console.log('🔑 JWT Token:', token);
-    console.log('👤 User Info:', {
-      id: req.user?._id,
-      name: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim(),
-      email: req.user?.email,
-      role: req.user?.role,
-    });
-    console.log('----------------------------------------');
+    const user = await User.findById(decoded.id).select('-password');
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    // Save/Update token
+    const issuedAt = new Date(decoded.iat * 1000);
+    const expiresAt = new Date(decoded.exp * 1000);
+
+    let tokenType = 'employee';
+    if (['manager', 'hr', 'superadmin'].includes(user.role)) {
+      tokenType = user.role;
+    }
+
+    await Token.findOneAndUpdate(
+      { user: user._id },
+      {
+        token,
+        role: user.role,
+        tokenType,
+        issuedAt,
+        expiresAt,
+      },
+      { upsert: true, new: true }
+    );
+
+    req.user = user;
 
     next();
   } catch (error) {
@@ -46,12 +61,9 @@ exports.protect = async (req, res, next) => {
   }
 };
 
-// ----------------------
 // 🧩 Role Authorization
-// ----------------------
 exports.authorize = (...roles) => {
   return (req, res, next) => {
-    // 🧭 Log current user role and allowed roles
     console.log(`👮 Role Check -> User Role: ${req.user.role}, Allowed: ${roles.join(', ')}`);
 
     if (!roles.includes(req.user.role)) {

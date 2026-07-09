@@ -24,12 +24,6 @@ exports.checkIn = async (req, res) => {
     const { latitude, longitude, address, deviceInfo } = req.body;
     const today = getISTMidnight();
 
-    console.log("Check-In Attempt");
-    console.log("User ID:", req.user.id);
-    console.log("Date (IST Midnight):", today);
-    console.log("Location:", { latitude, longitude, address });
-    console.log("Device Info:", deviceInfo);
-
     // ── employee weekend type ───────────────────────────────────────────────
     const user = await User.findById(req.user.id).select("weekendType");
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
@@ -52,8 +46,6 @@ exports.checkIn = async (req, res) => {
 
     // ── weekend or holiday logic ────────────────────────────────────────────
     if (isWeekend || holiday) {
-      console.log("Weekend/Holiday check detected");
-
       // Check if Combo Off is approved for today
       const comboOff = await ComboOff.findOne({
         employee: req.user.id,
@@ -71,7 +63,6 @@ exports.checkIn = async (req, res) => {
           message: msg,
         });
       } else {
-        console.log("✅ Combo Off Approved for this date");
       }
     }
 
@@ -93,8 +84,6 @@ exports.checkIn = async (req, res) => {
     const currentIST = moment().tz("Asia/Kolkata");
     const currentHour = currentIST.hour();
     const currentMinutes = currentIST.minute();
-
-    console.log("IST Current Time:", currentIST.format("HH:mm:ss"));
 
     if (currentHour >= 18) {
       return res.status(400).json({
@@ -160,7 +149,6 @@ exports.checkIn = async (req, res) => {
         comboOff.status = "earned";
         comboOff.earnedOn = new Date();
         await comboOff.save();
-        console.log("✅ Combo Off marked as earned");
       }
     }
 
@@ -310,10 +298,8 @@ exports.markMissedCheckouts = async () => {
     attendance.workHours = parseFloat(workHours);
     attendance.missedCheckout = true;
     await attendance.save();
-    console.log(`Missed checkout marked for employee ${attendance.employee}, work hours: ${attendance.workHours}`);
   }
 };
-
 
 // @desc    Get my attendance
 // @route   GET /api/attendance/my-attendance

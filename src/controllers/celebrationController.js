@@ -12,7 +12,6 @@ const timeout = (promise, ms) =>
 
 // This matches month and day, regardless of year
 const getCelebrations = async (dateField, additionalFilters = {}, date = moment(), limit = 10, skip = 0) => {
-  console.time(`getCelebrations-${dateField}`);
   try {
     const month = date.month() + 1; // MongoDB months are 1-indexed
     const day = date.date();
@@ -67,19 +66,15 @@ const getCelebrations = async (dateField, additionalFilters = {}, date = moment(
       ]),
       5000
     );
-
-    console.timeEnd(`getCelebrations-${dateField}`);
     return result;
   } catch (err) {
     console.error(`getCelebrations-${dateField} failed:`, err);
-    console.timeEnd(`getCelebrations-${dateField}`);
     return [];
   }
 };
 
 // Helper function for upcoming celebrations (EXCLUDING today)
 const getUpcomingCelebrations = async (dateField, days, additionalFilters = {}, limit = 10, skip = 0) => {
-  console.time(`getUpcomingCelebrations-${dateField}`);
   const today = moment();
   const endDate = moment().add(days, 'days');
 
@@ -145,7 +140,6 @@ const getUpcomingCelebrations = async (dateField, days, additionalFilters = {}, 
     5000
   );
 
-  console.timeEnd(`getUpcomingCelebrations-${dateField}`);
   return result;
 };
 
@@ -184,7 +178,6 @@ const countCelebrations = async (dateField, additionalFilters = {}, date = momen
 // Fetch only today's celebrations
 // Access: HR, superadmin
 exports.getAllTodayCelebrations = async (req, res, next) => {
-  console.log('Starting getAllTodayCelebrations', req.query);
 
   const date = req.query.date ? moment(req.query.date, 'YYYY-MM-DD') : moment();
   if (req.query.date && !date.isValid()) {
@@ -260,14 +253,12 @@ exports.getAllTodayCelebrations = async (req, res, next) => {
     }
   });
 
-  console.log('Completed getAllTodayCelebrations');
 };
 
 // GET /api/celebrations/upcoming
 // Fetch only upcoming celebrations (EXCLUDING today)
 // Access: HR, superadmin
 exports.getAllUpComingCelebrations = async (req, res, next) => {
-  console.log('Starting getAllUpComingCelebrations', req.query);
 
   const date = req.query.date ? moment(req.query.date, 'YYYY-MM-DD') : moment();
   if (req.query.date && !date.isValid()) {
@@ -359,14 +350,12 @@ exports.getAllUpComingCelebrations = async (req, res, next) => {
     }
   });
 
-  console.log('Completed getAllUpComingCelebrations');
 };
 
 // GET /api/celebrations/birthdays
 // Fetch employees with birthdays today, optionally with upcoming birthdays
 // Access: HR, superadmin
 exports.getTodaysBirthdays = async (req, res, next) => {
-  console.log('Starting getTodaysBirthdays', req.query);
 
   const date = req.query.date ? moment(req.query.date, 'YYYY-MM-DD') : moment();
   if (req.query.date && !date.isValid()) {
@@ -441,14 +430,12 @@ exports.getTodaysBirthdays = async (req, res, next) => {
         : []
     }
   });
-  console.log('Completed getTodaysBirthdays');
 };
 
 // GET /api/celebrations/marriage-anniversaries
 // Fetch employees with marriage anniversaries today, optionally with upcoming anniversaries
 // Access: HR, superadmin
 exports.getTodaysMarriageAnniversaries = async (req, res, next) => {
-  console.log('Starting getTodaysMarriageAnniversaries', req.query);
 
   const date = req.query.date ? moment(req.query.date, 'YYYY-MM-DD') : moment();
   if (req.query.date && !date.isValid()) {
@@ -524,14 +511,12 @@ exports.getTodaysMarriageAnniversaries = async (req, res, next) => {
         : []
     }
   });
-  console.log('Completed getTodaysMarriageAnniversaries');
 };
 
 // GET /api/celebrations/work-anniversaries
 // Fetch employees with work anniversaries today, optionally with upcoming anniversaries
 // Access: HR, superadmin
 exports.getTodaysWorkAnniversaries = async (req, res, next) => {
-  console.log('Starting getTodaysWorkAnniversaries', req.query);
 
   const date = req.query.date ? moment(req.query.date, 'YYYY-MM-DD') : moment();
   if (req.query.date && !date.isValid()) {
@@ -612,14 +597,12 @@ exports.getTodaysWorkAnniversaries = async (req, res, next) => {
         : []
     }
   });
-  console.log('Completed getTodaysWorkAnniversaries');
 };
 
 // GET /api/celebrations/stats
 // Fetch celebration statistics (e.g., by month)
 // Access: HR, superadmin
 exports.getCelebrationStats = async (req, res, next) => {
-  console.log('Starting getCelebrationStats', req.query);
 
   const year = parseInt(req.query.year) || moment().year();
   const department = req.query.department ? { department: req.query.department } : {};
@@ -711,14 +694,12 @@ exports.getCelebrationStats = async (req, res, next) => {
       workAnniversaries: stats[0].workAnniversaries
     }
   });
-  console.log('Completed getCelebrationStats');
 };
 
 // POST /api/celebrations/send-notification
 // Send celebration notifications (mock implementation)
 // Access: HR, superadmin
 exports.sendCelebrationNotification = async (req, res, next) => {
-  console.log('Starting sendCelebrationNotification', req.body);
   if (!['hr', 'superadmin'].includes(req.user.role)) {
     return res.status(403).json({
       success: false,
@@ -764,21 +745,17 @@ exports.sendCelebrationNotification = async (req, res, next) => {
     notifications.push(`Sending ${years}-year work anniversary email to ${user.fullName} (${user.email})`);
   });
 
-  console.log('Notifications:', notifications);
-
   res.status(200).json({
     success: true,
     message: 'Notifications queued successfully',
     data: notifications
   });
-  console.log('Completed sendCelebrationNotification');
 };
 
 // GET /api/celebrations/employee/:employeeId
 // Fetch employee details for celebration-related data
 // Access: HR, superadmin, or self
 exports.getEmployeeDetails = async (req, res, next) => {
-  console.log('Starting getEmployeeDetails', req.params);
   const { employeeId } = req.params;
 
   const employee = await User.findOne({ employeeId, isActive: true })
@@ -803,5 +780,4 @@ exports.getEmployeeDetails = async (req, res, next) => {
     success: true,
     data: employee
   });
-  console.log('Completed getEmployeeDetails');
 };

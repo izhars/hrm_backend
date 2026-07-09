@@ -4,8 +4,6 @@ const moment = require('moment-timezone');
 
 const testNotification = async () => {
     try {
-        console.log('🔔 Running BULK testNotification()');
-
         const users = await User.find({
             isActive: true,
             fcmToken: {
@@ -17,11 +15,8 @@ const testNotification = async () => {
         }).select('_id name fcmToken');
 
         if (!users.length) {
-            console.log('😴 No users with valid FCM tokens found.');
             return { success: true, count: 0 };
         }
-
-        console.log(`📬 Found ${users.length} users with valid FCM tokens.`);
 
         // Flatten tokens + map back to user IDs for cleanup
         const tokenToUserMap = new Map();
@@ -41,11 +36,8 @@ const testNotification = async () => {
         }
 
         if (allTokens.length === 0) {
-            console.log('⚠️ No valid FCM tokens after flattening.');
             return { success: true, count: 0 };
         }
-
-        console.log(`📨 Total tokens to send: ${allTokens.length}`);
 
         const firedAt = moment().tz('Asia/Kolkata');
         const payload = {
@@ -58,14 +50,8 @@ const testNotification = async () => {
                 firedAt: firedAt.toISOString(),
             },
         };
-
-        console.log('📦 FCM PAYLOAD (final):');
-        console.log(JSON.stringify(payload, null, 2));
-
         // ✅ Send ALL tokens in optimized batches (up to 500 per call)
         const result = await sendBulkNotifications(allTokens, payload, tokenToUserMap);
-
-        console.log(`✅ Bulk send result: ${result.successCount} succeeded, ${result.failureCount} failed.`);
         return {
             success: true,
             count: result.successCount,

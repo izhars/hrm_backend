@@ -1,8 +1,9 @@
+// controllers/taskController.js
 const Task = require('../models/Task');
 const User = require('../models/User');
 const { notifyTaskAssigned, notifyTaskUpdated, notifyTaskCompleted, notifyTaskComment } = require('../utils/taskNotifications');
 
-// Helper: Check if user can manage tasks
+// Helper: Check if user can manage tasks for this assignee
 const canManageEmployeeTasks = async (requester, assigneeId) => {
   const assignee = await User.findById(assigneeId);
   if (!assignee) throw new Error('Assignee not found');
@@ -25,14 +26,13 @@ exports.getTasks = async (req, res) => {
 
     const query = {};
 
-    // Role filtering
+    // Role-based filtering
     if (!['superadmin', 'hr'].includes(req.user.role)) {
       const managedEmployees = req.user.role === 'manager'
         ? await User.find({ managerId: req.user._id }).select('_id')
         : [];
 
       const allowed = [...managedEmployees.map(u => u._id), req.user._id];
-
       query.assignee = { $in: allowed };
     }
 
@@ -54,7 +54,6 @@ exports.getTasks = async (req, res) => {
       data: tasks,
       pagination: { page: +page, limit: +limit, total }
     });
-
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -62,10 +61,6 @@ exports.getTasks = async (req, res) => {
 
 // ===========================================
 // GET Single Task
-// ===========================================
-// GET Single Task
-// ===========================================
-// GET Single Task (comments as IDs only)
 // ===========================================
 exports.getTask = async (req, res) => {
   try {
@@ -76,7 +71,7 @@ exports.getTask = async (req, res) => {
         path: 'comments.author',
         select: 'firstName lastName email fullName',
       })
-      .lean(); // optional but 🔥 for performance
+      .lean();
 
     if (!task) {
       return res.status(404).json({
@@ -85,14 +80,11 @@ exports.getTask = async (req, res) => {
       });
     }
 
-    // ⏱️ Sort comments by time (latest first)
+    // Sort comments by time (latest first)
     if (task.comments?.length) {
-      task.comments.sort(
-        (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
-      );
+      task.comments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     }
 
-    // Normalize assignee ID
     const assigneeId = task.assignee?._id
       ? task.assignee._id.toString()
       : task.assignee.toString();
@@ -109,17 +101,11 @@ exports.getTask = async (req, res) => {
       success: true,
       data: task,
     });
-
   } catch (err) {
     console.error('❌ getTask error:', err);
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+    res.status(500).json({ success: false, message: err.message });
   }
 };
-
-
 
 // ===========================================
 // Create Task
@@ -140,7 +126,6 @@ exports.createTask = async (req, res) => {
       dueDate
     });
 
-    // Populate only essential fields
     await task.populate({
       path: 'assignee',
       select: 'firstName lastName email employeeId profilePicture designation department'
@@ -150,7 +135,7 @@ exports.createTask = async (req, res) => {
       select: 'firstName lastName email employeeId profilePicture designation'
     });
 
-    await notifyTaskAssigned(task.assignee._id, task); // 🔥 One-liner to send notification
+    await notifyTaskAssigned(task.assignee._id, task);
 
     res.status(201).json({ success: true, data: task });
   } catch (err) {
@@ -174,10 +159,9 @@ exports.updateTask = async (req, res) => {
     await task.save();
     await task.populate('assignee assigner');
 
-    await notifyTaskUpdated(task.assignee._id, task); // For updates
+    await notifyTaskUpdated(task.assignee._id, task);
 
     res.json({ success: true, data: task });
-
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
   }
@@ -189,19 +173,14 @@ exports.updateTask = async (req, res) => {
 exports.completeTask = async (req, res) => {
   try {
     const task = await Task.findById(req.params.id);
-    if (!task) {
-      return res.status(404).json({ success: false, message: 'Task not found' });
-    }
+    if (!task) return res.status(404).json({ success: false, message: 'Task not found' });
 
-    // ✅ Normalize assignee ID
     const assigneeId = task.assignee?._id
       ? task.assignee._id.toString()
       : task.assignee.toString();
 
     const allowed = await canManageEmployeeTasks(req.user, assigneeId);
-    if (!allowed) {
-      return res.status(403).json({ success: false, message: 'Not authorized' });
-    }
+    if (!allowed) return res.status(403).json({ success: false, message: 'Not authorized' });
 
     task.status = 'completed';
     task.completedAt = new Date();
@@ -209,48 +188,33 @@ exports.completeTask = async (req, res) => {
     await task.save();
     await task.populate('assignee assigner');
 
-    await notifyTaskCompleted(task.assignee._id, task); // For marking completed
+    await notifyTaskCompleted(task.assignee._id, task);
 
     res.json({ success: true, data: task });
-
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 };
-
 
 // ===========================================
 // Add Comment
 // ===========================================
 exports.addComment = async (req, res) => {
   try {
-    console.log('📝 Add Comment API hit');
-    console.log('➡️ Task ID:', req.params.id);
-    console.log('➡️ User:', req.user._id.toString(), '| Role:', req.user.role);
-    console.log('➡️ Comment Text:', req.body.text);
-
-    // Fetch task
     const task = await Task.findById(req.params.id);
     if (!task) {
-      console.warn('❌ Task not found:', req.params.id);
       return res.status(404).json({ success: false, message: 'Task not found' });
     }
 
-    // Normalize assignee ID (handles ObjectId vs populated object)
     const assigneeId = task.assignee?._id
       ? task.assignee._id.toString()
       : task.assignee.toString();
 
-    console.log('➡️ Task assignee ID:', assigneeId);
-
-    // Check permissions
     const allowed = await canManageEmployeeTasks(req.user, assigneeId);
     if (!allowed) {
-      console.warn('🚫 Unauthorized comment attempt by', req.user._id.toString());
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
 
-    // Add comment
     task.comments.push({
       text: req.body.text,
       author: req.user._id
@@ -258,16 +222,11 @@ exports.addComment = async (req, res) => {
 
     await task.save();
 
-    // Populate authors for proper response
     await task.populate('comments.author', 'firstName lastName email');
-
-    console.log('✅ Comment added successfully');
-    console.log('➡️ Total comments:', task.comments.length);
 
     await notifyTaskComment(task, req.user._id);
 
     res.json({ success: true, data: task });
-
   } catch (err) {
     console.error('🔥 Add comment failed:', err);
     res.status(400).json({ success: false, message: err.message });
@@ -280,23 +239,15 @@ exports.addComment = async (req, res) => {
 exports.deleteTask = async (req, res) => {
   try {
     const task = await Task.findById(req.params.id);
-
     if (!task) {
-      return res.status(404).json({
-        success: false,
-        message: 'Task not found',
-      });
+      return res.status(404).json({ success: false, message: 'Task not found' });
     }
 
-    // Authorization check
     const isAdmin = ['superadmin', 'hr'].includes(req.user.role);
     const isAssigner = task.assigner.toString() === req.user._id.toString();
 
     if (!isAdmin && !isAssigner) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to delete this task',
-      });
+      return res.status(403).json({ success: false, message: 'Not authorized to delete this task' });
     }
 
     await Task.findByIdAndDelete(task._id);
@@ -305,13 +256,8 @@ exports.deleteTask = async (req, res) => {
       success: true,
       message: 'Task deleted successfully',
     });
-
   } catch (err) {
     console.error('❌ deleteTask error:', err);
-    res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+    res.status(500).json({ success: false, message: err.message });
   }
 };
-

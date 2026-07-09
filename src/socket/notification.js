@@ -27,14 +27,13 @@ function initNotificationSocket(io) {
 
   // 🔹 On connection
   ioInstance.on('connection', (socket) => {
-    console.log(`🔔 User connected to notifications: ${socket.user._id}`);
-
     // Join personal + role rooms
     socket.join(socket.user._id.toString());
     socket.join(socket.user.role);
     socket.join('all');
 
     socket.on('disconnect', () => {
+      // Optional: Log disconnection only in development
       console.log(`🔕 User disconnected: ${socket.user._id}`);
     });
   });

@@ -13,6 +13,13 @@ const notificationSchema = new mongoose.Schema(
       enum: ['superadmin', 'hr', 'manager', 'employee', 'all'],
     },
 
+    // Notification type - only define this ONCE
+    type: {
+      type: String,
+      enum: ['info', 'warning', 'success', 'error', 'system', 'call', 'meeting', 'task'],
+      default: 'info',
+    },
+
     title: {
       type: String,
       required: true,
@@ -23,12 +30,6 @@ const notificationSchema = new mongoose.Schema(
       type: String,
       required: true,
       trim: true,
-    },
-
-    type: {
-      type: String,
-      enum: ['info', 'warning', 'success', 'error', 'system'],
-      default: 'info',
     },
 
     read: {
@@ -44,16 +45,38 @@ const notificationSchema = new mongoose.Schema(
       default: {},
     },
 
+    // For audit trail
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+    },
+
     // Soft delete
     deleted: {
       type: Boolean,
       default: false,
     },
+
+    deletedAt: Date,
+    deletedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+    },
+
+    // For global notifications
+    isGlobal: {
+      type: Boolean,
+      default: false,
+    }
   },
   { timestamps: true }
 );
 
-notificationSchema.index({ user: 1, createdAt: -1 });
-notificationSchema.index({ role: 1 });
+// Indexes for better query performance
+notificationSchema.index({ user: 1, read: 1, createdAt: -1 });
+notificationSchema.index({ role: 1, createdAt: -1 });
+notificationSchema.index({ type: 1 });
+notificationSchema.index({ isGlobal: 1 });
+notificationSchema.index({ deleted: 1 });
 
 module.exports = mongoose.model('Notification', notificationSchema);

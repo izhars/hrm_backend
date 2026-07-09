@@ -7,8 +7,8 @@ const userSchema = new mongoose.Schema(
     // Core Employee Info
     employeeId: {
       type: String,
-      required: [true, 'Employee ID is required'],
-      unique: true,
+      required: true,
+      unique: true, // this already creates an index
       uppercase: true,
       trim: true,
       match: [/^[A-Z]+[0-9]+$/, 'Employee ID format: Letters followed by numbers, e.g., SCAIPLE001']
@@ -17,8 +17,8 @@ const userSchema = new mongoose.Schema(
     lastName: { type: String, required: [true, 'Last name is required'], trim: true },
     email: {
       type: String,
-      required: [true, 'Email is required'],
-      unique: true,
+      required: true,
+      unique: true, // already indexed
       lowercase: true,
       trim: true,
       match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email address']
@@ -38,6 +38,34 @@ const userSchema = new mongoose.Schema(
     fcmToken: {
       type: String,
       default: null,
+    },
+
+    notificationSettings: {
+      enabled: {
+        type: Boolean,
+        default: true
+      },
+      employeeInteractions: {
+        type: Boolean,
+        default: true
+      },
+      messages: {
+        type: Boolean,
+        default: true
+      },
+      calls: {
+        type: Boolean,
+        default: true
+      },
+      scheduleUpdates: {
+        type: Boolean,
+        default: true
+      }
+    },
+
+    lastActive: {
+      type: Date,
+      default: Date.now
     },
 
     // Role & Hierarchy
@@ -192,6 +220,41 @@ const userSchema = new mongoose.Schema(
       uploadedAt: { type: Date, default: Date.now }
     }],
     profilePicture: { type: String, default: '' },
+    profilePicturePublicId: { type: String, default: null },
+
+    // ────────────────────── NEW FIELDS ADDED HERE ──────────────────────
+
+    // Chat & UI Settings
+    chatSettings: {
+      soundEnabled: { type: Boolean, default: true },
+      notificationEnabled: { type: Boolean, default: true },
+      theme: { type: String, default: 'light', enum: ['light', 'dark'] },
+      messagePreview: { type: Boolean, default: true }
+    },
+
+    // Real-time socket connections (for online status & typing indicators)
+    socketIds: [{
+      socketId: String,
+      connectedAt: { type: Date, default: Date.now },
+      userAgent: String,
+      platform: String,
+      _id: false
+    }],
+
+    // Push Notification Preferences
+    notificationSettings: {
+      messageSound: { type: Boolean, default: true },
+      messageVibrate: { type: Boolean, default: true },
+      groupSound: { type: Boolean, default: true },
+      mentionsOnly: { type: Boolean, default: false },
+      doNotDisturb: {
+        enabled: { type: Boolean, default: false },
+        startTime: { type: String }, // e.g., "22:00"
+        endTime: { type: String }   // e.g., "08:00"
+      }
+    },
+
+    // ────────────────────── END OF NEW FIELDS ──────────────────────
 
     // System Fields
     isActive: { type: Boolean, default: true },
@@ -237,19 +300,51 @@ const userSchema = new mongoose.Schema(
       },
       _id: false
     }],
+
+    faceData: {
+      faceId: {
+        type: String,
+        unique: true,
+        sparse: true
+      },
+      registered: {
+        type: Boolean,
+        default: false
+      },
+      registeredAt: Date,
+      lastUpdated: Date,
+      lastVerified: Date,
+      verificationCount: {
+        type: Number,
+        default: 0
+      },
+      images: [{
+        imageId: String,
+        base64: String, // Store full data URL: "data:image/jpeg;base64,..."
+        features: mongoose.Schema.Types.Mixed,
+        confidence: Number,
+        boundingBox: mongoose.Schema.Types.Mixed,
+        createdAt: {
+          type: Date,
+          default: Date.now
+        }
+      }],
+      features: mongoose.Schema.Types.Mixed, // Google Vision features
+      confidence: Number,
+      boundingBox: mongoose.Schema.Types.Mixed,
+      googleFaceId: String, // If you want to store Google's face IDs
+    },
   },
   {
     timestamps: true,
     toJSON: { virtuals: true },
     toObject: { virtuals: true }
-  }
+  },
 );
 
 // ────────────────────────────────────────────────────────────────
 // Indexes for Performance
 // ────────────────────────────────────────────────────────────────
-userSchema.index({ employeeId: 1 });
-userSchema.index({ email: 1 });
 userSchema.index({ department: 1 });
 userSchema.index({ role: 1, isActive: 1 });
 userSchema.index({ dateOfJoining: -1 });

@@ -1,4 +1,4 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
 
 const {
@@ -9,33 +9,61 @@ const {
   getComboOffById,
   deleteComboOff,
   getMonthlyComboOffSummary,
-} = require('../controllers/comboOffController');
+  getComboOffBalance,
+} = require("../controllers/comboOffController");
 
-const { protect, authorize, hrAndAbove } = require('../middleware/auth');
+const { protect, hrAndAbove } = require("../middleware/auth");
 
-// --------------------------------------
-// 🔐 Auth Protected Routes
-// --------------------------------------
+/**
+ * =========================
+ * EMPLOYEE ROUTES
+ * =========================
+ */
 
-// 🧾 1️⃣ Employee: Get all my combo offs
-router.get('/me', protect, getMyComboOffs);
+// Apply for combo off
+router.post("/", protect, applyComboOff);
 
-// ➕ 2️⃣ Employee: Apply for combo off
-router.post('/', protect, applyComboOff);
+// Get my combo offs
+router.get("/me", protect, getMyComboOffs);
 
-// 👀 3️⃣ HR/Admin: Get all combo offs (optionally filter by status)
-router.get('/', protect, hrAndAbove, getAllComboOffs);
+// Get combo off balance
+router.get("/balance", protect, getComboOffBalance);
 
-// 📅 4️⃣ HR/Admin: Get monthly summary
-router.get('/summary/monthly', protect, hrAndAbove, getMonthlyComboOffSummary);
+/**
+ * =========================
+ * HR / ADMIN ROUTES
+ * =========================
+ */
 
-// 🔎 5️⃣ HR/Admin/Employee: Get a single combo off by ID
-router.get('/:id', protect, getComboOffById);
+// Monthly summary
+router.get(
+  "/summary/monthly",
+  protect,
+  hrAndAbove,
+  getMonthlyComboOffSummary
+);
 
-// ✅❌ 6️⃣ HR: Approve or Reject combo off (pass { action: "approve" | "reject" } in body)
-router.put('/:comboOffId/review', protect, hrAndAbove, reviewComboOff);
+// Get all combo offs (optional ?status=pending|approved|rejected)
+router.get("/", protect, hrAndAbove, getAllComboOffs);
 
-// 🗑️ 7️⃣ Employee: Delete own pending combo off
-router.delete('/:id', protect, deleteComboOff);
+// Review combo off (approve / reject)
+router.put(
+  "/:comboOffId/review",
+  protect,
+  hrAndAbove,
+  reviewComboOff
+);
+
+/**
+ * =========================
+ * SHARED (KEEP LAST 🚨)
+ * =========================
+ */
+
+// Get single combo off by ID
+router.get("/:id", protect, getComboOffById);
+
+// Delete combo off (employee, pending only)
+router.delete("/:id", protect, deleteComboOff);
 
 module.exports = router;

@@ -1,105 +1,392 @@
 const admin = require("./firebase");
 const User = require("../models/User");
+const EmployeeInteraction = require("../models/EmployeeInteraction");
 
 const INVALID_TOKEN_ERRORS = new Set([
-  "messaging/registration-token-not-registered",
-  "messaging/invalid-registration-token",
-  "messaging/invalid-argument",
+  'messaging/registration-token-not-registered',
+  'messaging/invalid-registration-token',
+  'messaging/invalid-argument'
 ]);
 
 /**
- * Send push notification to a user
- * @param {string|ObjectId} userId
- * @param {{
- *   title: string,
- *   body: string,
- *   imageUrl?: string,
- *   data?: Record<string, any>
- * }} payload
+ * Unified notification sender
  */
 async function sendNotification(userId, payload) {
-  console.log(`📤 Sending notification → User: ${userId}`);
+  console.log("🔔 [sendNotification] START");
+  console.log("👤 [sendNotification] User ID:", userId);
+  console.log("📦 [sendNotification] Payload:", JSON.stringify(payload, null, 2));
 
   try {
     const user = await User.findById(userId).lean();
+
     if (!user) {
-      console.log("❌ User not found");
-      return;
+      console.warn(`⚠️ [sendNotification] User not found: ${userId}`);
+      return { success: false, reason: "user_not_found" };
     }
 
+    console.log("👤 [sendNotification] User found");
+
+    // ===============================
+    // 🔕 Notification preference checks
+    // ===============================
+    const settings = user.notificationSettings || {};
+
+    // 1️⃣ Global master switch
+    if (settings.enabled === false) {
+      console.log(`🔕 [sendNotification] Notifications globally disabled for user ${userId}`);
+      return { success: false, reason: "notifications_disabled" };
+    }
+
+    // 2️⃣ Type-based switches
+    const type = payload?.data?.type;
+
+    const typeToSettingMap = {
+      incoming_call: "calls",
+      call_accepted: "calls",
+      call_declined: "calls",
+      call_ended: "calls",
+      call_missed: "calls",
+      call_action_complete: "calls",
+      message: "messages",
+      employee_interaction: "employeeInteractions",
+      schedule_update: "scheduleUpdates",
+    };
+
+    const settingKey = typeToSettingMap[type];
+
+    if (settingKey && settings[settingKey] === false) {
+      console.log(
+        `🔕 [sendNotification] ${settingKey} notifications disabled for user ${userId} (type: ${type})`
+      );
+      return { success: false, reason: `${settingKey}_disabled` };
+    }
+
+    // ===============================
+    // 📱 FCM token handling
+    // ===============================
     const tokens = Array.isArray(user.fcmToken)
       ? user.fcmToken.filter(Boolean)
       : user.fcmToken
         ? [user.fcmToken]
         : [];
 
+    console.log("📱 [sendNotification] FCM Tokens:", tokens);
+
     if (tokens.length === 0) {
-      console.log("⚠️ No FCM tokens found for user");
-      return;
+      console.warn(`⚠️ [sendNotification] No FCM tokens for user ${userId}`);
+      return { success: false, reason: "no_tokens" };
     }
 
-    // ✅ DATA-ONLY MESSAGE (no notification field)
+    // ===============================
+    // 🚀 Build FCM message
+    // ===============================
+    const flattenedData = {};
+    if (payload.data) {
+      Object.keys(payload.data).forEach(key => {
+        const value = payload.data[key];
+        flattenedData[key] = typeof value === 'object' ? JSON.stringify(value) : String(value);
+      });
+    }
+
     const message = {
       tokens,
-      data: {
-        // Required fields for your Flutter app
-        title: payload.title || 'Notification',
-        body: payload.body || '',
-        ...(payload.imageUrl && { imageUrl: payload.imageUrl }),
-        
-        // Additional custom data
-        ...Object.fromEntries(
-          Object.entries(payload.data || {}).map(([k, v]) => [k, String(v)])
-        ),
+      notification: {
+        title: payload.title || "Notification",
+        body: payload.body || "",
+        ...(payload.imageUrl && { image: payload.imageUrl }),
       },
-
+      data: flattenedData,
       android: {
         priority: "high",
-        ttl: 60 * 60 * 1000, // 1 hour
+        ttl: 60 * 60 * 1000,
+        notification: {
+          sound: payload.data?.type === 'incoming_call' ? "ringtone" : "default",
+          channelId: payload.data?.type === 'incoming_call' ? "staffsync_calls" : "staffsync_general",
+        },
       },
-
       apns: {
         headers: {
-          "apns-priority": "10",
+          "apns-priority": payload.data?.type === 'incoming_call' ? "10" : "5",
+          "apns-push-type": "alert",
         },
         payload: {
           aps: {
-            contentAvailable: true, // Wakes app in background
+            alert: {
+              title: payload.title,
+              body: payload.body,
+            },
+            sound: payload.data?.type === 'incoming_call' ? "ringtone.aiff" : "default",
+            badge: 1,
+            contentAvailable: true,
+            ...(payload.data?.type === 'incoming_call' && {
+              category: "INCOMING_CALL",
+              interruptionLevel: "time-sensitive"
+            }),
           },
         },
       },
     };
 
-    console.log("📨 FCM Payload:", JSON.stringify(message, null, 2));
+    console.log("🚀 [sendNotification] Final FCM message:", JSON.stringify(message, null, 2));
 
+    // ===============================
+    // 📡 Send notification
+    // ===============================
     const response = await admin.messaging().sendEachForMulticast(message);
 
-    console.log(
-      `✅ Notifications sent: ${response.successCount} | ❌ Failed: ${response.failureCount}`
-    );
+    console.log("📊 [sendNotification] FCM response:", {
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+    });
 
+    // ===============================
+    // 🧹 Cleanup invalid tokens
+    // ===============================
     if (response.failureCount > 0) {
-      await cleanupInvalidTokens(tokens, response.responses, userId);
+      console.warn("🧹 [sendNotification] Cleaning up invalid tokens");
+
+      const invalidTokens = [];
+
+      response.responses.forEach((res, index) => {
+        if (
+          !res.success &&
+          res.error &&
+          INVALID_TOKEN_ERRORS.has(res.error.code)
+        ) {
+          invalidTokens.push(tokens[index]);
+        }
+      });
+
+      if (invalidTokens.length > 0) {
+        await User.updateOne(
+          { _id: userId },
+          { $pull: { fcmToken: { $in: invalidTokens } } }
+        );
+
+        console.log(
+          `🧹 [sendNotification] Removed ${invalidTokens.length} invalid tokens`
+        );
+      }
     }
+
+    console.log("✅ [sendNotification] DONE");
+
+    return {
+      success: true,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+      totalTokens: tokens.length,
+    };
   } catch (err) {
-    console.error("🔥 sendNotification fatal error:", err);
+    console.error("🔥 [sendNotification] ERROR:", err);
+    throw err;
   }
 }
 
 /**
- * Send push notification to many tokens across users (bulk)
- * @param {string[]} tokens - List of FCM tokens
- * @param {Object} payload - Notification payload (title, body, data, etc.)
- * @param {Map<string, ObjectId>} tokenToUserMap - Map from token → userId for cleanup
+ * Send call notification with user identification
  */
+async function sendCallNotification({
+  callerId,
+  receiverId,
+  callId,
+  roomId,
+  callType = 'audio',
+  notificationType, // 'incoming_call', 'call_accepted', 'call_declined', 'call_ended', 'call_missed'
+  actionBy = null, // Who performed the action (null for incoming call)
+  reason = '',
+  metadata = {}
+}) {
+  try {
+    if (callerId.toString() === receiverId.toString()) {
+      return { success: false, reason: 'self_call' };
+    }
+
+    const caller = await User.findById(callerId).select('firstName lastName profilePicture notificationSettings');
+    const receiver = await User.findById(receiverId).select('firstName lastName notificationSettings');
+
+    if (!caller || !receiver) {
+      throw new Error('User not found');
+    }
+
+    // Check notification preferences
+    if (receiver.notificationSettings &&
+      receiver.notificationSettings.calls === false) {
+      console.log(`🔕 Call notifications disabled for user ${receiverId}`);
+      return { success: false, reason: 'calls_disabled' };
+    }
+
+    const callerName = `${caller.firstName || ''} ${caller.lastName || ''}`.trim() || 'Unknown';
+    const receiverName = `${receiver.firstName || ''} ${receiver.lastName || ''}`.trim() || 'User';
+
+    let title, body;
+    let sound = "default";
+    let channel = "staffsync_general";
+
+    switch (notificationType) {
+      case 'incoming_call':
+        title = `📞 Incoming ${callType === 'audio' ? 'Audio' : 'Video'} Call`;
+        body = `${callerName} is calling you`;
+        sound = "ringtone";
+        channel = "staffsync_calls";
+        break;
+      case 'call_accepted':
+        title = '✅ Call Accepted';
+        body = `${receiverName} accepted your call`;
+        break;
+      case 'call_declined':
+        title = '❌ Call Declined';
+        body = `${callerName} declined your call`;
+        break;
+      case 'call_ended':
+        title = '📞 Call Ended';
+        body = reason || `${callerName} ended the call`;
+        break;
+      case 'call_missed':
+        title = '⏰ Missed Call';
+        body = `Missed call from ${callerName}`;
+        break;
+      default:
+        title = '📞 Call Update';
+        body = 'Call status updated';
+    }
+
+    const payload = {
+      title,
+      body,
+      imageUrl: caller.profilePicture || null,
+      data: {
+        type: notificationType,
+        callId,
+        roomId,
+        callerId: callerId.toString(),
+        callerName,
+        receiverId: receiverId.toString(),
+        receiverName,
+        callType,
+        // Add action identification fields
+        ...(actionBy && { actionBy: actionBy.toString() }),
+        ...(notificationType === 'call_declined' && { declinedBy: actionBy?.toString() }),
+        ...(notificationType === 'call_ended' && { endedBy: actionBy?.toString() }),
+        ...(notificationType === 'call_missed' && { missedBy: actionBy?.toString() }),
+        reason,
+        metadata: JSON.stringify(metadata),
+        timestamp: new Date().toISOString(),
+        click_action: 'FLUTTER_NOTIFICATION_CLICK'
+      }
+    };
+
+    return await sendNotification(receiverId, payload);
+  } catch (error) {
+    console.error('🔥 Call notification error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Send employee interaction notification
+ */
+async function sendEmployeeInteractionNotification({
+  senderId,
+  receiverId,
+  interactionType,
+  message = '',
+  metadata = {}
+}) {
+  try {
+    if (senderId.toString() === receiverId.toString()) {
+      return { success: false, reason: 'self_interaction' };
+    }
+
+    const sender = await User.findById(senderId).select('firstName lastName profilePicture notificationSettings');
+    const receiver = await User.findById(receiverId).select('notificationSettings');
+
+    if (!sender || !receiver) {
+      throw new Error('User not found');
+    }
+
+    if (receiver.notificationSettings &&
+      receiver.notificationSettings.employeeInteractions === false) {
+      console.log(`🔕 Employee interaction notifications disabled for user ${receiverId}`);
+      return { success: false, reason: 'employee_interactions_disabled' };
+    }
+
+    const senderName = `${sender.firstName || ''} ${sender.lastName || ''}`.trim() || 'Someone';
+
+    let title, body;
+    let action = 'VIEW_PROFILE';
+
+    switch (interactionType) {
+      case 'viewed_profile':
+        title = '👀 Profile Viewed';
+        body = `${senderName} viewed your profile`;
+        action = 'VIEW_PROFILE';
+        break;
+      case 'viewed_contact':
+        title = '📞 Contact Viewed';
+        body = `${senderName} viewed your contact info`;
+        action = 'VIEW_CONTACT';
+        break;
+      case 'messaged':
+        title = '💬 New Message';
+        body = message || `${senderName} sent you a message`;
+        action = 'VIEW_MESSAGES';
+        break;
+      case 'shared_profile':
+        title = '📤 Profile Shared';
+        body = `${senderName} shared your profile`;
+        action = 'VIEW_PROFILE';
+        break;
+      case 'saved_contact':
+        title = '⭐ Contact Saved';
+        body = `${senderName} saved your contact`;
+        action = 'VIEW_CONTACT';
+        break;
+      case 'downloaded_resume':
+        title = '📥 Resume Downloaded';
+        body = `${senderName} downloaded your resume`;
+        action = 'VIEW_RESUME';
+        break;
+      case 'started_call':
+        title = '📞 Call Initiated';
+        body = `${senderName} started a call with you`;
+        action = 'VIEW_CALL';
+        break;
+      default:
+        title = '📱 New Activity';
+        body = `${senderName} interacted with your profile`;
+        action = 'VIEW_PROFILE';
+    }
+
+    const payload = {
+      title,
+      body,
+      imageUrl: sender.profilePicture || null,
+      data: {
+        type: 'employee_interaction',
+        interactionType,
+        senderId: senderId.toString(),
+        senderName,
+        receiverId: receiverId.toString(),
+        action,
+        metadata: JSON.stringify(metadata),
+        timestamp: new Date().toISOString(),
+        click_action: 'FLUTTER_NOTIFICATION_CLICK'
+      }
+    };
+
+    return await sendNotification(receiverId, payload);
+  } catch (error) {
+    console.error('🔥 Employee interaction notification error:', error);
+    throw error;
+  }
+}
+
 async function sendBulkNotifications(tokens, payload, tokenToUserMap = new Map()) {
   if (!tokens || tokens.length === 0) {
     return { successCount: 0, failureCount: 0, invalidTokensCleaned: 0 };
   }
 
-  console.log(`📤 Sending bulk notification to ${tokens.length} tokens...`);
-
-  // Build multicast message (data-only)
   const message = {
     tokens,
     data: {
@@ -112,22 +399,32 @@ async function sendBulkNotifications(tokens, payload, tokenToUserMap = new Map()
     },
     android: {
       priority: 'high',
-      ttl: 60 * 60 * 1000, // 1 hour
+      ttl: 60 * 60 * 1000,
+      notification: {
+        sound: payload.data?.type === 'incoming_call' ? "ringtone" : "default",
+        channelId: payload.data?.type === 'incoming_call' ? "staffsync_calls" : "staffsync_general",
+      },
     },
     apns: {
-      headers: { 'apns-priority': '10' },
-      payload: {
-        aps: { contentAvailable: true },
+      headers: { 
+        'apns-priority': payload.data?.type === 'incoming_call' ? '10' : '5',
+        'apns-push-type': 'alert' 
+      },
+      payload: { 
+        aps: { 
+          contentAvailable: true,
+          sound: payload.data?.type === 'incoming_call' ? "ringtone.aiff" : "default",
+          ...(payload.data?.type === 'incoming_call' && {
+            category: "INCOMING_CALL",
+            interruptionLevel: "time-sensitive"
+          }),
+        } 
       },
     },
   };
 
   try {
     const response = await admin.messaging().sendEachForMulticast(message);
-
-    console.log(
-      `✅ Bulk send: ${response.successCount} OK | ❌ ${response.failureCount} failed`
-    );
 
     let invalidTokensCleaned = 0;
 
@@ -156,13 +453,7 @@ async function sendBulkNotifications(tokens, payload, tokenToUserMap = new Map()
   }
 }
 
-/**
- * Clean up invalid tokens across multiple users
- * @param {string[]} invalidTokens
- * @param {Map<string, ObjectId>} tokenToUserMap
- */
 async function cleanupInvalidTokensBulk(invalidTokens, tokenToUserMap) {
-  // Group tokens by user ID
   const userTokensMap = new Map();
 
   for (const token of invalidTokens) {
@@ -175,7 +466,6 @@ async function cleanupInvalidTokensBulk(invalidTokens, tokenToUserMap) {
 
   let totalRemoved = 0;
 
-  // Update each user in parallel
   const updatePromises = Array.from(userTokensMap.entries()).map(
     async ([userId, tokensToRemove]) => {
       const result = await User.findByIdAndUpdate(
@@ -183,8 +473,8 @@ async function cleanupInvalidTokensBulk(invalidTokens, tokenToUserMap) {
         { $pull: { fcmToken: { $in: tokensToRemove } } },
         { new: true }
       );
-      console.log(`🗑️ User ${userId}: removed ${tokensToRemove.length} invalid tokens`);
       totalRemoved += tokensToRemove.length;
+      return result;
     }
   );
 
@@ -192,32 +482,112 @@ async function cleanupInvalidTokensBulk(invalidTokens, tokenToUserMap) {
   return totalRemoved;
 }
 
-async function cleanupInvalidTokens(tokens, responses, userId) {
-  const invalidTokens = [];
-
-  responses.forEach((res, idx) => {
-    if (!res.success) {
-      const code = res.error?.code;
-      if (INVALID_TOKEN_ERRORS.has(code)) {
-        invalidTokens.push(tokens[idx]);
-        console.log(`🧹 Invalid token detected: ${tokens[idx]} (${code})`);
-      }
-    }
-  });
-
-  if (invalidTokens.length === 0) return;
-
-  await User.findByIdAndUpdate(userId, {
-    $pull: { fcmToken: { $in: invalidTokens } },
-  });
-
-  console.log(
-    `🗑️ Removed ${invalidTokens.length} invalid FCM token(s) for user ${userId}`
-  );
+async function logEmployeeInteraction({
+  senderId,
+  receiverId,
+  interactionType,
+  notificationSent = false,
+  metadata = {}
+}) {
+  try {
+    const interaction = await EmployeeInteraction.create({
+      senderId,
+      receiverId,
+      interactionType,
+      notificationSent,
+      metadata
+    });
+    
+    return interaction;
+  } catch (error) {
+    console.error('🔥 Error logging interaction:', error);
+    throw error;
+  }
 }
 
-// Export both functions
-module.exports = { 
+/**
+ * Get user's interactions
+ */
+async function getUserInteractions(userId, options = {}) {
+  const {
+    limit = 50,
+    offset = 0,
+    interactionType,
+    startDate,
+    endDate
+  } = options;
+
+  const query = {
+    $or: [
+      { senderId: userId },
+      { receiverId: userId }
+    ]
+  };
+
+  if (interactionType) {
+    query.interactionType = interactionType;
+  }
+
+  if (startDate || endDate) {
+    query.createdAt = {};
+    if (startDate) query.createdAt.$gte = new Date(startDate);
+    if (endDate) query.createdAt.$lte = new Date(endDate);
+  }
+
+  const interactions = await EmployeeInteraction.find(query)
+    .sort({ createdAt: -1 })
+    .skip(parseInt(offset))
+    .limit(parseInt(limit))
+    .populate('senderId', 'firstName lastName profilePicture')
+    .populate('receiverId', 'firstName lastName profilePicture')
+    .lean();
+
+  return interactions;
+}
+
+/**
+ * Get interaction statistics
+ */
+async function getInteractionStats(userId) {
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  const stats = await EmployeeInteraction.aggregate([
+    {
+      $match: {
+        receiverId: new mongoose.Types.ObjectId(userId),
+        createdAt: { $gte: thirtyDaysAgo }
+      }
+    },
+    {
+      $group: {
+        _id: '$interactionType',
+        count: { $sum: 1 }
+      }
+    }
+  ]);
+
+  // Format the response
+  const formattedStats = {};
+  stats.forEach(stat => {
+    formattedStats[stat._id] = stat.count;
+  });
+
+  return {
+    last30Days: formattedStats,
+    totalInteractions: await EmployeeInteraction.countDocuments({
+      receiverId: userId
+    })
+  };
+}
+
+module.exports = {
   sendNotification,
-  sendBulkNotifications  // Fixed: Added to exports
+  sendCallNotification, // Added new function
+  sendBulkNotifications,
+  sendEmployeeInteractionNotification,
+  cleanupInvalidTokensBulk,
+  logEmployeeInteraction,
+  getUserInteractions,
+  getInteractionStats
 };

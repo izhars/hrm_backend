@@ -4,7 +4,6 @@ const Department = require('./models/Department');
 
 async function createSuperAdmin() {
   try {
-    console.log('🔍 Checking for Administration department...');
     let adminDept = await Department.findOne({ name: 'Administration' });
 
     if (!adminDept) {
@@ -13,17 +12,13 @@ async function createSuperAdmin() {
         code: 'ADM',
         description: 'System Administration Department',
       });
-      console.log('📁 Administration department created');
     }
 
     const existingAdmin = await User.findOne({ role: 'superadmin' });
 
     if (existingAdmin) {
-      console.log('ℹ️ Superadmin exists → skipping...');
       return;
     }
-
-    console.log('👤 Creating SuperAdmin...');
 
     await User.create({
       employeeId: 'ADM001',
@@ -38,7 +33,6 @@ async function createSuperAdmin() {
       isActive: true,
     });
 
-    console.log('🎉 SuperAdmin created!');
   } catch (err) {
     console.error('❌ Error creating SuperAdmin:', err.message);
   }

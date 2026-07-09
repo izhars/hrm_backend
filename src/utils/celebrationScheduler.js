@@ -132,17 +132,13 @@ async function getTodaysCelebrations() {
  */
 async function sendCelebrationNotifications() {
   try {
-    console.log('🎉 Running cron: Send celebration notifications');
     await updateCronRun('sendCelebrationNotifications');
 
     const celebrants = await getTodaysCelebrations();
     
     if (celebrants.length === 0) {
-      console.log('📅 No celebrations today');
       return { success: true, count: 0, message: 'No celebrations today' };
     }
-
-    console.log(`🎊 Found ${celebrants.length} employee(s) celebrating today`);
 
     let personalNotifications = 0;
     let announcementNotifications = 0;
@@ -155,7 +151,6 @@ async function sendCelebrationNotifications() {
             await notifyBirthdayPerson(celebrant._id, celebration.age);
             personalNotifications++;
             
-            // Send announcement to others (only once per person)
             await notifyBirthdayAnnouncement(
               celebrant._id, 
               celebrant.fullName, 
@@ -188,8 +183,6 @@ async function sendCelebrationNotifications() {
             announcementNotifications++;
           }
         }
-        
-        console.log(`✅ Sent notifications for ${celebrant.fullName} (${celebrant.celebrations.map(c => c.type).join(', ')})`);
       } catch (error) {
         console.error(`❌ Failed to send notifications for ${celebrant.fullName}:`, error.message);
       }
@@ -198,7 +191,7 @@ async function sendCelebrationNotifications() {
     // Send summary notification to HR/Admin
     await sendCelebrationSummaryToAdmin(celebrants);
 
-    const result = {
+    return {
       success: true,
       count: celebrants.length,
       personalNotifications,
@@ -206,9 +199,6 @@ async function sendCelebrationNotifications() {
       totalNotifications: personalNotifications + announcementNotifications,
       message: `Celebration notifications sent to ${celebrants.length} employee(s)`
     };
-    
-    console.log(`✅ ${result.message}`);
-    return result;
   } catch (error) {
     console.error('❌ Error in celebration notifications cron:', error);
     return { success: false, error: error.message };
@@ -246,8 +236,6 @@ async function sendCelebrationSummaryToAdmin(celebrants) {
         },
       });
     }
-    
-    console.log(`📊 Sent celebration summary to ${hrAdmins.length} HR/Admin(s)`);
   } catch (error) {
     console.error('❌ Error sending summary to admin:', error);
   }
@@ -271,7 +259,6 @@ function scheduleCelebrationNotifications() {
   const reminderJob = cron.schedule(
     '0 15 * * *',
     async () => {
-      console.log('🔔 Running celebration reminder');
       // You can add logic to send reminder notifications
     },
     {
@@ -280,7 +267,6 @@ function scheduleCelebrationNotifications() {
     }
   );
 
-  console.log('✅ Celebration notification scheduler initialized');
   return { job, reminderJob };
 }
 

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 // ✅ Correctly destructure the upload middleware
-const { upload } = require('../middleware/upload');
+const { profileUpload } = require('../middleware/upload');
 
 const {
   register,
@@ -49,6 +49,6 @@ router.put('/change-password', changePassword);
 router.get('/check-verification', checkVerification);
 
 // ✅ Now this works correctly!
-router.put('/profile-picture', upload.single('file'), updateProfilePicture);
+router.put('/profile-picture', profileUpload.single('file'), updateProfilePicture);
 
 module.exports = router;

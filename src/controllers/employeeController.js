@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const Department = require('../models/Department');
+const { isUserOnline, debugUserConnection } = require('../socket/chat'); // adjust path
 
 // @desc    Get all employees
 // @route   GET /api/employees
@@ -63,30 +64,74 @@ exports.getAllEmployees = async (req, res) => {
   }
 };
 
-
-
-exports.getEmployeeLastSeen = async (req, res) => {
+exports.getEmployeeList = async (req, res) => {
   try {
-    const { id } = req.params;
-    const employee = await User.findById(id).select('firstName lastName lastSeen');
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
 
-    if (!employee) {
-      return res.status(404).json({ success: false, message: 'Employee not found' });
-    }
+    // 🔥 Exclude superadmin
+    const filter = { role: { $ne: 'superadmin' } };
+
+    // Total count (WITHOUT superadmin)
+    const totalEmployees = await User.countDocuments(filter);
+
+    // Fetch employees
+    const employees = await User.find(filter)
+      .populate('department', 'name code description head')
+      .populate(
+        'reportingManager',
+        'firstName lastName email employeeId profilePicture designation'
+      )
+      .select('-password')
+      .sort({ firstName: 1 })
+      .skip(skip)
+      .limit(limit);
+
+    const employeeList = employees.map(emp => {
+      const userId = emp._id.toString();
+      const online = isUserOnline(userId);
+      const connectionInfo = debugUserConnection(userId);
+
+      let lastSeen = emp.lastSeen;
+      if (online) lastSeen = 'Now';
+      else if (!lastSeen) lastSeen = 'Never';
+
+      return {
+        id: userId,
+        name: `${emp.firstName} ${emp.lastName}`,
+        email: emp.email,
+        employeeId: emp.employeeId,
+        role: emp.role,
+        department: emp.department,
+        reportingManager: emp.reportingManager,
+        isOnline: online,
+        lastSeen,
+        socketConnections: connectionInfo.socketIds,
+        currentConnections: connectionInfo.currentConnections
+      };
+    });
 
     res.status(200).json({
       success: true,
-      data: {
-        id: employee._id,
-        name: `${employee.firstName} ${employee.lastName}`,
-        lastSeen: employee.lastSeen || 'Never',
-      },
+      page,
+      limit,
+      totalEmployees,
+      totalPages: Math.ceil(totalEmployees / limit),
+      employees: employeeList
     });
+
   } catch (error) {
-    console.error('Error fetching last seen:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
+    console.error('Error fetching employee list:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
   }
 };
+
+
 
 // @desc    Get all HR employees
 // @route   GET /api/employees/hr

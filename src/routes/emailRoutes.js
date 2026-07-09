@@ -1,3 +1,4 @@
+// routes/emailRoutes.js
 const express = require('express');
 const router = express.Router();
 const emailService = require('../utils/emailService');
@@ -35,36 +36,26 @@ router.get('/stats', protect, authorize('admin'), async (req, res) => {
   }
 });
 
-// Send test email (Admin only)
+// Send test email (Admin/HR only)
 router.post('/test', protect, authorize('admin', 'hr'), async (req, res) => {
-  console.log('=== Test Email Attempt ===');
-  console.log('Performed by User:', req.user?._id, 'Role:', req.user?.role);
-  console.log('Request Body:', req.body);
-  emailService.clearTemplateCache();
-  
   try {
     const { email } = req.body;
 
     if (!email) {
-      console.log('❌ Missing email in request body');
       return res.status(400).json({
         success: false,
         error: 'Email is required'
       });
     }
 
-    console.log('📨 Sending test email to:', email);
-
+    await emailService.clearTemplateCache();
     const result = await emailService.sendTestEmail(email);
-
-    console.log('✅ Test email sent successfully. Message ID:', result.messageId);
 
     res.json({
       success: true,
       message: 'Test email sent successfully',
       messageId: result.messageId
     });
-
   } catch (error) {
     console.error('🔥 Test email error:', error);
     res.status(500).json({
@@ -73,7 +64,6 @@ router.post('/test', protect, authorize('admin', 'hr'), async (req, res) => {
     });
   }
 });
-
 
 // Send announcement email (Admin/HR only)
 router.post('/announcement', protect, authorize('admin', 'hr'), async (req, res) => {

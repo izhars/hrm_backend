@@ -377,81 +377,133 @@ exports.permanentDeleteHoliday = async (req, res) => {
 // Bulk import holidays from CSV/JSON file
 exports.bulkImportHolidays = async (req, res) => {
   try {
+    console.log('📥 Bulk import started'); // log start
+
     if (!req.file) {
+      console.log('❌ No file uploaded');
       return res.status(400).json({ message: 'No file uploaded' });
     }
 
-    const filePath = req.file.path;
+    console.log('📄 File received:', req.file.originalname, 'Type:', req.file.mimetype);
+
+    const fileBuffer = req.file.buffer;
+    const fileType = req.file.mimetype;
+
     const results = [];
 
-    return new Promise((resolve, reject) => {
-      fs.createReadStream(filePath)
-        .pipe(csv())
-        .on('data', (data) => {
-          // Map CSV columns to holiday fields
-          const holidayData = {
-            name: data.name?.trim(),
-            date: new Date(data.date),
-            description: data.description?.trim(),
-            type: data.type || 'Festival'
-          };
+    if (fileType === 'text/csv' || fileType === 'application/vnd.ms-excel') {
+      console.log('🔄 Processing CSV file');
 
-          // Validate required fields
-          if (holidayData.name && !isNaN(holidayData.date.getTime())) {
-            results.push(holidayData);
-          }
-        })
-        .on('end', async () => {
-          try {
-            if (results.length === 0) {
-              fs.unlinkSync(filePath);
-              return res.status(400).json({ message: 'No valid holidays found in file' });
+      const stream = require('stream');
+      const csv = require('csv-parser');
+
+      await new Promise((resolve, reject) => {
+        const readable = stream.Readable();
+        readable.push(fileBuffer);
+        readable.push(null); // End stream
+
+        readable
+          .pipe(csv())
+          .on('data', (data) => {
+            console.log('➡️ Row parsed:', data);
+
+            const holidayData = {
+              name: data.name?.trim(),
+              date: new Date(data.date),
+              description: data.description?.trim() || '',
+              type: data.type?.trim() || 'Festival'
+            };
+
+            if (holidayData.name && !isNaN(holidayData.date.getTime())) {
+              results.push(holidayData);
+            } else {
+              console.log('⚠️ Invalid row skipped:', data);
             }
+          })
+          .on('end', () => {
+            console.log('✅ CSV parsing completed, valid rows:', results.length);
+            resolve();
+          })
+          .on('error', (err) => {
+            console.log('❌ CSV parsing error:', err);
+            reject(err);
+          });
+      });
 
-            // Bulk create with error handling
-            const createdHolidays = [];
-            const errors = [];
+    } else if (fileType === 'application/json') {
+      console.log('🔄 Processing JSON file');
 
-            for (const holidayData of results) {
-              try {
-                const existing = await Holiday.findOne({ date: holidayData.date });
-                if (existing) {
-                  errors.push(`Holiday exists on ${holidayData.date.toDateString()}`);
-                  continue;
-                }
-
-                const holiday = await Holiday.create(holidayData);
-                createdHolidays.push(holiday);
-              } catch (err) {
-                errors.push(`Error creating "${holidayData.name}": ${err.message}`);
-              }
+      try {
+        const jsonData = JSON.parse(fileBuffer.toString('utf-8'));
+        if (Array.isArray(jsonData)) {
+          jsonData.forEach(item => {
+            const holidayData = {
+              name: item.name?.trim(),
+              date: new Date(item.date),
+              description: item.description?.trim() || '',
+              type: item.type?.trim() || 'Festival'
+            };
+            if (holidayData.name && !isNaN(holidayData.date.getTime())) {
+              results.push(holidayData);
+            } else {
+              console.log('⚠️ Invalid JSON row skipped:', item);
             }
+          });
+          console.log('✅ JSON parsing completed, valid rows:', results.length);
+        }
+      } catch (err) {
+        console.log('❌ JSON parsing error:', err);
+        return res.status(400).json({ message: 'Invalid JSON format' });
+      }
+    } else {
+      console.log('❌ Unsupported file type:', fileType);
+      return res.status(400).json({ message: 'Unsupported file type for bulk import' });
+    }
 
-            // Clean up temp file
-            fs.unlinkSync(filePath);
+    if (results.length === 0) {
+      console.log('⚠️ No valid holidays found in file');
+      return res.status(400).json({ message: 'No valid holidays found in file' });
+    }
 
-            res.status(201).json({
-              message: 'Bulk import completed',
-              imported: createdHolidays.length,
-              errors: errors.length,
-              data: createdHolidays
-            });
+    const createdHolidays = [];
+    const errors = [];
 
-          } catch (error) {
-            fs.unlinkSync(filePath);
-            reject(error);
-          }
-        })
-        .on('error', (error) => {
-          fs.unlinkSync(filePath);
-          reject(error);
-        });
+    for (const holidayData of results) {
+      try {
+        const existing = await Holiday.findOne({ date: holidayData.date });
+        if (existing) {
+          const msg = `Holiday already exists on ${holidayData.date.toDateString()}`;
+          console.log('⚠️', msg);
+          errors.push(msg);
+          continue;
+        }
+
+        const holiday = await Holiday.create(holidayData);
+        console.log('✅ Holiday created:', holiday.name, holiday.date.toDateString());
+        createdHolidays.push(holiday);
+      } catch (err) {
+        const msg = `Error creating "${holidayData.name}": ${err.message}`;
+        console.log('❌', msg);
+        errors.push(msg);
+      }
+    }
+
+    console.log('📊 Bulk import completed:', createdHolidays.length, 'imported,', errors.length, 'failed');
+
+    return res.status(201).json({
+      message: 'Bulk import completed',
+      imported: createdHolidays.length,
+      errors: errors.length,
+      data: createdHolidays,
+      failed: errors
     });
+
   } catch (error) {
-    console.error('Bulk import error:', error);
-    res.status(500).json({ message: 'Failed to import holidays', error: error.message });
+    console.error('🔥 Bulk import error:', error);
+    return res.status(500).json({ message: 'Failed to import holidays', error: error.message });
   }
 };
+
 
 // Export holidays as CSV
 exports.exportHolidays = async (req, res) => {

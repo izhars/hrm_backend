@@ -11,10 +11,11 @@ const errorHandler = require('./middleware/errorHandler');
 const cronJobs = require('./utils/cronJobs');
 const emailService = require('./utils/emailService');
 const createSuperAdmin = require('./seedAdmin');
-const { initChat } = require('./socket/chat');
+const { initSocket } = require('./socket');
 
 // Firebase Admin
 const admin = require('../src/firebase/firebase');
+
 
 // Routes
 const authRoutes = require('./routes/authRoutes');
@@ -28,7 +29,7 @@ const assetRoutes = require('./routes/assetRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const holidayRoutes = require('./routes/holidayRoutes');
 const celebrationRoutes = require('./routes/celebrationRoutes');
-const chatRoutes = require('./routes/chat');
+const chatRoutes = require('./routes/chatRoutes');
 const feedbackRoutes = require('./routes/feedbackRoutes');
 const pollRoutes = require('./routes/pollRoutes');
 const awardRoutes = require('./routes/awardRoutes');
@@ -44,7 +45,20 @@ const emailRoutes = require('./routes/emailRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const taskRoutes = require('./routes/taskRoutes');
 const systemRoutes = require('./routes/systemRoutes');
+const expenseRoutes = require('./routes/expenseRoutes');
+const expenseCategoryRoutes = require('./routes/expenseCategoryRoutes');
+const projectRoutes = require('./routes/projectRoutes');
+const roleRoutes = require('./routes/roleRoutes');
+const tokenRoutes = require('./routes/tokenRoutes');
+const debugRoutes = require('./routes/debugRoutes');
+const dailyTaskRoutes = require('./routes/dailyTaskRoutes');
+const callRoutes = require('./routes/callRoutes');  
+const employeeInteractionRoutes = require('./routes/employeeInteractionRoutes');
+const face = require('./routes/faceRecognitionRoutes'); 
+const rfidRoutes = require('./routes/rfidRoutes'); // RFID routes
+const numberPlateRoutes = require('./routes/numberPlateRoutes');
 
+// Initialize Express app
 const app = express();
 const server = http.createServer(app);
 
@@ -60,9 +74,12 @@ app.use(
     },
   })
 );
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(cors({
+  origin: process.env.CLIENT_URL || 'http://localhost:3000',
+  credentials: true
+}));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
@@ -90,7 +107,7 @@ app.use('/api/feedbacks', feedbackRoutes);
 app.use('/api/polls', pollRoutes);
 app.use('/api/awards', awardRoutes);
 app.use('/api/badges', badgeRoutes);
-app.use('/api/notifications', notificationRoutes);
+// app.use('/api/notifications', notificationRoutes);
 app.use('/api/cron', cronTestRoutes);
 app.use('/api/combooff', comboOffRoutes);
 app.use('/api/faqs', faqRoutes);
@@ -101,6 +118,63 @@ app.use('/api/email', emailRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/system', systemRoutes);
+app.use('/api/expenses', expenseRoutes);
+app.use('/api/expense-categories', expenseCategoryRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/project-roles', roleRoutes);
+app.use('/api/tokens', tokenRoutes);
+app.use('/api/debug', debugRoutes);
+app.use('/api/daily-tasks', dailyTaskRoutes);
+app.use('/api/calls', callRoutes);  // Add call routes
+app.use('/api/employee-interactions', employeeInteractionRoutes);
+app.use('/api/face', face); // Face recognition routes
+app.use('/api/rfid-scans', rfidRoutes); // RFID scan routes
+app.use('/api/plate', numberPlateRoutes);
+
+// Add a debug endpoint
+app.get('/api/debug/socket-status', (req, res) => {
+  try {
+    const { getIo, getOnlineUsers } = require('./socket/chat');
+    const io = getIo();
+
+    if (!io) {
+      return res.json({
+        success: false,
+        message: 'Socket.IO not initialized',
+        status: 'io_not_initialized'
+      });
+    }
+
+    const onlineUsers = getOnlineUsers ? getOnlineUsers() : [];
+    const sockets = io.sockets ? Array.from(io.sockets.sockets.keys()) : [];
+
+    res.json({
+      success: true,
+      status: 'running',
+      ioInitialized: !!io,
+      connectedSockets: sockets.length,
+      onlineUsersCount: onlineUsers.length,
+      onlineUsers: onlineUsers,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+// Test connection endpoint
+app.get('/api/test-connection', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Server is running',
+    timestamp: new Date().toISOString(),
+    socketEnabled: true
+  });
+});
 
 // 404 Handler
 app.use((req, res) => {
@@ -111,6 +185,13 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
+
+// Connection monitoring middleware
+app.use((req, res, next) => {
+  console.log(`🌐 [${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
+
 
 // Start server after MongoDB connection
 connectDB()
@@ -132,7 +213,16 @@ connectDB()
     }
 
     // Initialize Socket.IO
-    const io = initChat(server);
+    const io = initSocket(server);
+
+    // Monitor socket connections
+    io.engine.on("connection_error", (err) => {
+      console.error('🔥 Socket.IO connection error:', {
+        code: err.code,
+        message: err.message,
+        context: err.context
+      });
+    });
 
     // Test Firebase Admin (optional)
     try {
@@ -146,12 +236,14 @@ connectDB()
     server.listen(PORT, () => {
       console.log(`
 ╔═══════════════════════════════════════════════════════════════╗
-║                   HRMS Server Started                         ║
+║                    HRMS Server Started                        ║
 ╠═══════════════════════════════════════════════════════════════╣
 ║ Environment : ${process.env.NODE_ENV || 'development'}        ║
 ║ Port        : ${PORT}                                         ║
 ║ API         : http://localhost:${PORT}/api                    ║
 ║ Socket      : ws://localhost:${PORT}                          ║
+║ Debug       : http://localhost:${PORT}/api/debug/socket-status║
+║ Test        : http://localhost:${PORT}/api/test-connection    ║
 ║ Reset Page  : http://localhost:${PORT}/reset-password/:token  ║
 ║ Email       : ${process.env.EMAIL_HOST || 'Not Configured'}   ║
 ╚═══════════════════════════════════════════════════════════════╝
@@ -178,7 +270,6 @@ process.on('SIGTERM', () => {
 });
 
 process.on('SIGINT', () => {
-  console.log('🛑 SIGINT received. Shutting down gracefully...');
   server.close(() => {
     console.log('✅ Process terminated');
     process.exit(0);

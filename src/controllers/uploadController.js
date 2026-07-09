@@ -1,52 +1,278 @@
-// controllers/uploadController.js
 const cloudinary = require('cloudinary').v2;
-const { uploadToCloudinary, deleteFromCloudinary } = require('../middleware/upload');
+const { 
+  uploadToCloudinary, 
+  deleteFromCloudinary, 
+  uploadGroupAvatar, 
+  uploadProfilePicture,
+  uploadChatProfile 
+} = require('../middleware/upload');
 const Message = require('../models/Message');
 const User = require('../models/User');
+const Conversation = require('../models/Conversation');
+const AppError = require('../utils/AppError');
+
+// ============================
+// GROUP AVATAR UPLOAD
+// ============================
+exports.uploadGroupAvatar = async (req, res) => {
+  try {
+    console.log('📤 [Group Avatar Upload] Starting...');
+    
+    if (!req.file) {
+      console.log('❌ No file uploaded');
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded'
+      });
+    }
+
+    // Check file size and type
+    if (req.file.size > 5 * 1024 * 1024) {
+      return res.status(400).json({
+        success: false,
+        message: 'File size exceeds 5MB limit'
+      });
+    }
+
+    // Check if groupId is provided (for existing group update)
+    const { groupId } = req.body;
+    let oldPublicId = null;
+
+    // If updating existing group, get old avatar for deletion
+    if (groupId) {
+      console.log(`🔍 Updating avatar for group: ${groupId}`);
+      const group = await Conversation.findById(groupId);
+      
+      if (!group) {
+        return res.status(404).json({
+          success: false,
+          message: 'Group not found'
+        });
+      }
+
+      // Check if user has permission (admin or owner)
+      const userRole = group.getUserRole(req.user.id);
+      if (!['admin', 'owner'].includes(userRole)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Only admins or owner can update group avatar'
+        });
+      }
+
+      // Store old public ID for cleanup
+      if (group.avatarPublicId) {
+        oldPublicId = group.avatarPublicId;
+      }
+    }
+
+    // Upload to Cloudinary
+    const uploadResult = await uploadGroupAvatar(req.file.buffer, {
+      folder: `group_avatars/${req.user.id}`,
+      public_id: `group_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    });
+
+    console.log('✅ Group avatar uploaded:', uploadResult.url);
+
+    // Delete old avatar if exists
+    if (oldPublicId) {
+      try {
+        await deleteFromCloudinary(oldPublicId);
+        console.log('🗑️ Old avatar deleted:', oldPublicId);
+      } catch (deleteError) {
+        console.warn('⚠️ Failed to delete old avatar:', deleteError);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Group avatar uploaded successfully',
+      data: {
+        url: uploadResult.url,
+        publicId: uploadResult.publicId,
+        format: uploadResult.format,
+        bytes: uploadResult.bytes,
+        width: uploadResult.width,
+        height: uploadResult.height,
+        resourceType: uploadResult.resourceType
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Group avatar upload error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to upload group avatar'
+    });
+  }
+};
+
+// ============================
+// PROFILE PICTURE UPLOAD
+// ============================
+exports.uploadProfilePicture = async (req, res) => {
+  try {
+    console.log('📤 [Profile Picture Upload] Starting...');
+    
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded'
+      });
+    }
+
+    const userId = req.body.userId || req.user.id;
+    
+    // Check permission
+    if (userId !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this profile picture'
+      });
+    }
+
+    // Get user and old avatar info
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const oldPublicId = user.profilePicturePublicId;
+
+    // Upload new profile picture
+    const uploadResult = await uploadProfilePicture(req.file.buffer, {
+      folder: `profile_pictures/${userId}`,
+      public_id: `profile_${userId}_${Date.now()}`
+    });
+
+    // Delete old profile picture
+    if (oldPublicId) {
+      try {
+        await deleteFromCloudinary(oldPublicId);
+        console.log('🗑️ Old profile picture deleted');
+      } catch (deleteError) {
+        console.warn('⚠️ Failed to delete old profile:', deleteError);
+      }
+    }
+
+    // Update user in database
+    user.profilePicture = uploadResult.url;
+    user.profilePicturePublicId = uploadResult.publicId;
+    await user.save();
+
+    console.log('✅ Profile picture updated for user:', userId);
+
+    res.json({
+      success: true,
+      message: 'Profile picture updated successfully',
+      data: {
+        url: uploadResult.url,
+        publicId: uploadResult.publicId,
+        userId: user._id,
+        fullName: user.fullName
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Profile picture upload error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to upload profile picture'
+    });
+  }
+};
+
+// ============================
+// CHAT PROFILE UPLOAD
+// ============================
+exports.uploadChatProfile = async (req, res) => {
+  try {
+    console.log('📤 [Chat Profile Upload] Starting...');
+    
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded'
+      });
+    }
+
+    const userId = req.user.id;
+    const user = await User.findById(userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const oldPublicId = user.chatProfilePicturePublicId;
+
+    // Upload chat profile picture
+    const uploadResult = await uploadChatProfile(req.file.buffer, {
+      folder: `chat_profiles/${userId}`,
+      public_id: `chat_profile_${userId}_${Date.now()}`
+    });
+
+    // Delete old chat profile
+    if (oldPublicId) {
+      try {
+        await deleteFromCloudinary(oldPublicId);
+      } catch (deleteError) {
+        console.warn('Failed to delete old chat profile:', deleteError);
+      }
+    }
+
+    // Update user
+    user.chatProfilePicture = uploadResult.url;
+    user.chatProfilePicturePublicId = uploadResult.publicId;
+    await user.save();
+
+    console.log('✅ Chat profile updated for user:', userId);
+
+    res.json({
+      success: true,
+      message: 'Chat profile picture updated successfully',
+      data: {
+        url: uploadResult.url,
+        publicId: uploadResult.publicId
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Chat profile upload error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to upload chat profile'
+    });
+  }
+};
+
+// ============================
+// EXISTING FUNCTIONS (keep as is)
+// ============================
 
 // Upload single file
 exports.uploadFile = async (req, res) => {
   try {
-    console.log('📥 Incoming upload request...');
-
     if (!req.file) {
-      console.log('⚠️ No file found in request');
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
     const { type, messageId, userId } = req.body;
 
-    console.log('📤 File details:', {
-      originalName: req.file.originalname,
-      mimetype: req.file.mimetype,
-      size: req.file.size,
-      uploadType: type,
-      messageId,
-      userId,
-    });
-
     // Upload to Cloudinary using buffer from memory storage
-    console.log('☁️ Uploading to Cloudinary...');
     const cloudinaryResult = await uploadToCloudinary(req.file.buffer, {
       folder: type === 'profile' ? 'profiles' : 'chat_attachments',
       resource_type: 'auto',
     });
 
-    console.log('☁️ Cloudinary upload result:', {
-      url: cloudinaryResult.url,
-      publicId: cloudinaryResult.publicId,
-      width: cloudinaryResult.width,
-      height: cloudinaryResult.height,
-    });
-
     // Update chat message attachment
     if (type === 'chat' && messageId) {
-      console.log(`💬 Updating message attachment for messageId: ${messageId}`);
       const message = await Message.findById(messageId);
-
-      if (!message) {
-        console.log('⚠️ No message found for this messageId');
-      } else {
+      if (message) {
         message.attachment = {
           type: req.file.mimetype.startsWith('image/') ? 'image' : 'file',
           url: cloudinaryResult.url,
@@ -57,23 +283,17 @@ exports.uploadFile = async (req, res) => {
           uploadedAt: new Date(),
         };
         await message.save();
-        console.log('✅ Message updated successfully');
       }
     }
 
     // Update user profile picture
     if (type === 'profile' && userId) {
-      console.log(`🧑 Updating profile picture for userId: ${userId}`);
       const user = await User.findById(userId);
-
-      if (!user) {
-        console.log('⚠️ User not found');
-      } else {
+      if (user) {
+        // Delete old profile picture if exists
         if (user.profilePicture?.publicId) {
-          console.log('🗑 Deleting old profile picture:', user.profilePicture.publicId);
           try {
             await deleteFromCloudinary(user.profilePicture.publicId);
-            console.log('✅ Old profile picture deleted');
           } catch (err) {
             console.error('❌ Failed to delete old profile picture:', err);
           }
@@ -85,12 +305,8 @@ exports.uploadFile = async (req, res) => {
           uploadedAt: new Date(),
         };
         await user.save();
-
-        console.log('✅ Profile picture updated successfully');
       }
     }
-
-    console.log('🎉 Upload successful, sending response...');
 
     res.json({
       success: true,
@@ -103,17 +319,12 @@ exports.uploadFile = async (req, res) => {
         mimeType: req.file.mimetype,
         type: req.file.mimetype.startsWith('image/') ? 'image' : 'file',
         dimensions: cloudinaryResult.width && cloudinaryResult.height
-          ? {
-            width: cloudinaryResult.width,
-            height: cloudinaryResult.height,
-          }
+          ? { width: cloudinaryResult.width, height: cloudinaryResult.height }
           : null,
       },
     });
-
   } catch (error) {
     console.error('❌ Upload error occurred:', error);
-
     res.status(500).json({
       success: false,
       error: error.message || 'File upload failed',
@@ -163,7 +374,6 @@ exports.uploadMultipleFiles = async (req, res) => {
       message: `${uploadResults.filter(r => r.success).length} files uploaded successfully`,
       results: uploadResults,
     });
-
   } catch (error) {
     console.error('❌ Multiple upload error:', error);
     res.status(500).json({ success: false, error: error.message || 'File upload failed' });
@@ -180,7 +390,6 @@ exports.deleteFile = async (req, res) => {
       success: result.result === 'ok',
       message: result.result === 'ok' ? 'File deleted successfully' : 'File deletion failed',
     });
-
   } catch (error) {
     console.error('❌ Delete error:', error);
     res.status(500).json({ success: false, error: error.message || 'File deletion failed' });
@@ -201,28 +410,8 @@ exports.getSignedUploadUrl = async (req, res) => {
       apiKey: process.env.CLOUDINARY_API_KEY,
       folder: 'chat_attachments',
     });
-
   } catch (error) {
     console.error('❌ Sign upload error:', error);
     res.status(500).json({ success: false, error: error.message || 'Failed to generate upload signature' });
   }
 };
-
-// router.post('/mark-read', async (req, res) => {
-//     try {
-//         const { employeeId, messageIds } = req.body;
-        
-//         await Message.updateMany(
-//             { 
-//                 _id: { $in: messageIds },
-//                 to: employeeId,
-//                 readAt: { $exists: false }
-//             },
-//             { $set: { readAt: new Date() } }
-//         );
-        
-//         res.json({ success: true });
-//     } catch (error) {
-//         res.status(500).json({ error: error.message });
-//     }
-// });

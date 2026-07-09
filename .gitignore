@@ -1,5 +1,7 @@
+# Secrets
 .env
-*.env
 .env.*
+src/config/google-credentials.json
+
+# Dependencies
 node_modules/
-.DS_Store

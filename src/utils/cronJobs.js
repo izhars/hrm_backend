@@ -43,7 +43,6 @@ async function getEmployeesToNotify(type) {
   const isHoliday = await isTodayHoliday();
 
   if (isHoliday) {
-    console.log('📅 Today is a holiday, skipping notifications');
     return [];
   }
 
@@ -51,7 +50,6 @@ async function getEmployeesToNotify(type) {
   const toNotify = [];
 
   for (const emp of employees) {
-    // Check if employee is on approved leave
     const onLeave = await isEmployeeOnLeave(emp._id);
     if (onLeave) continue;
 
@@ -80,9 +78,7 @@ async function getEmployeesToNotify(type) {
 const cronTasks = {
   sendTestNotification: async () => {
     try {
-      console.log('⏰ Running cron: sendTestNotification');
       await updateCronRun('sendTestNotification');
-
       const result = await testNotification();
       return result;
     } catch (error) {
@@ -93,22 +89,17 @@ const cronTasks = {
 
   autoCheckoutEmployees: async () => {
     try {
-      console.log('⏰ Running cron: Auto checkout employees who missed checkout');
       await updateCronRun('autoCheckoutEmployees');
 
       const istNow = moment().tz('Asia/Kolkata');
       const isHoliday = await isTodayHoliday();
 
       if (isHoliday) {
-        console.log('📅 Today is a holiday, skipping auto checkout');
         return { success: true, count: 0, message: 'Holiday - no auto checkout' };
       }
 
-      // ✅ FIX 1: Create date range for today in IST
       const todayStart = istNow.clone().startOf('day').toDate();
       const todayEnd = istNow.clone().endOf('day').toDate();
-
-      console.log(`🔍 Searching for attendance between ${todayStart} and ${todayEnd}`);
 
       const pendingAttendances = await Attendance.find({
         date: { $gte: todayStart, $lte: todayEnd },
@@ -117,14 +108,10 @@ const cronTasks = {
         status: 'present',
       });
 
-      console.log(`📊 Found ${pendingAttendances.length} pending checkouts`);
-
       if (!pendingAttendances.length) {
-        console.log('✅ No pending auto checkouts found.');
         return { success: true, count: 0, message: 'No pending checkouts' };
       }
 
-      // ✅ FIX 2: Use current time instead of standard 6 PM
       const checkOutTime = istNow.toDate();
 
       let successCount = 0;
@@ -147,20 +134,17 @@ const cronTasks = {
 
           await attendance.save();
           successCount++;
-          console.log(`🕘 Auto checked out employee ${attendance.employee} (${totalHours}h)`);
         } catch (err) {
           console.error(`❌ Failed to checkout ${attendance.employee}:`, err.message);
         }
       }
 
-      const result = {
+      return {
         success: true,
         count: successCount,
         total: pendingAttendances.length,
         message: `Auto checkout complete for ${successCount}/${pendingAttendances.length} employee(s)`
       };
-      console.log(`✅ ${result.message}`);
-      return result;
     } catch (error) {
       console.error('❌ Error in auto checkout cron:', error);
       return { success: false, error: error.message };
@@ -169,7 +153,6 @@ const cronTasks = {
 
   markAbsentEmployees: async () => {
     try {
-      console.log('📅 Running cron: Mark absent employees');
       await updateCronRun('markAbsentEmployees');
 
       const istNow = moment().tz('Asia/Kolkata');
@@ -179,7 +162,6 @@ const cronTasks = {
       const isHoliday = await isTodayHoliday();
 
       if (isHoliday) {
-        console.log('📅 Today is a holiday, skipping absent marking');
         return { success: true, count: 0, message: 'Holiday - no absent marking' };
       }
 
@@ -187,14 +169,9 @@ const cronTasks = {
       let markedCount = 0;
 
       for (const employee of employees) {
-        // Check if employee is on approved leave
         const onLeave = await isEmployeeOnLeave(employee._id);
-        if (onLeave) {
-          console.log(`📝 ${employee.name} is on approved leave, skipping absent marking`);
-          continue;
-        }
+        if (onLeave) continue;
 
-        // Check if attendance exists for today
         const attendance = await Attendance.findOne({
           employee: employee._id,
           date: { $gte: todayStart, $lte: todayEnd }
@@ -207,11 +184,9 @@ const cronTasks = {
             status: 'absent',
           });
           markedCount++;
-          console.log(`❌ Marked ${employee.name} as absent`);
         }
       }
 
-      console.log(`✅ Marked ${markedCount} employees as absent`);
       return { success: true, count: markedCount };
     } catch (error) {
       console.error('❌ Error marking absent employees:', error);
@@ -221,7 +196,6 @@ const cronTasks = {
 
   resetLeaveBalance: async () => {
     try {
-      console.log('🔁 Running cron: Reset leave balance');
       await updateCronRun('resetLeaveBalance');
 
       const result = await User.updateMany(
@@ -235,7 +209,6 @@ const cronTasks = {
         }
       );
 
-      console.log(`✅ Leave balance reset for ${result.modifiedCount} employees`);
       return { success: true, count: result.modifiedCount };
     } catch (error) {
       console.error('❌ Error resetting leave balance:', error);
@@ -245,7 +218,6 @@ const cronTasks = {
 
   sendBirthdayWishes: async () => {
     try {
-      console.log('🎉 Running cron: Send birthday wishes');
       await updateCronRun('sendBirthdayWishes');
 
       const today = moment().tz('Asia/Kolkata');
@@ -263,16 +235,11 @@ const cronTasks = {
       });
 
       if (employees.length === 0) {
-        console.log('No birthdays today 🎈');
         return { success: true, count: 0, message: 'No birthdays today' };
       }
 
-      for (const emp of employees) {
-        console.log(`🎂 Happy Birthday, ${emp.name}! 🎉`);
-        // Optionally: await emailService.sendBirthdayWish(emp);
-      }
+      // Optionally: await emailService.sendBirthdayWish(emp);
 
-      console.log(`✅ Sent birthday wishes to ${employees.length} employee(s)`);
       return { success: true, count: employees.length };
     } catch (error) {
       console.error('❌ Error sending birthday wishes:', error);
@@ -282,23 +249,10 @@ const cronTasks = {
 
   generateMonthlyReport: async () => {
     try {
-      console.log('📈 Running cron: Generate monthly attendance report');
       await updateCronRun('generateMonthlyReport');
 
-      // Get last month's data
-      const lastMonth = moment().subtract(1, 'month');
-      const monthStart = lastMonth.startOf('month').toDate();
-      const monthEnd = lastMonth.endOf('month').toDate();
-
       // TODO: Generate and save report
-      // This could involve calculating:
-      // - Total working days
-      // - Leaves taken
-      // - Average work hours
-      // - Late arrivals
-      // - Early departures
 
-      console.log('✅ Monthly attendance report generated successfully');
       return { success: true };
     } catch (error) {
       console.error('❌ Error generating monthly report:', error);
@@ -308,17 +262,13 @@ const cronTasks = {
 
   notifyMorningPunchIn: async () => {
     try {
-      console.log('⏰ Running cron: Morning punch-in reminders');
       await updateCronRun('notifyMorningPunchIn');
 
       const employees = await getEmployeesToNotify('morning_in');
 
       if (employees.length === 0) {
-        console.log('✅ No employees need morning punch-in reminders');
         return { success: true, count: 0 };
       }
-
-      console.log(`⏰ Sending morning punch-in reminders to ${employees.length} employees`);
 
       const results = await Promise.allSettled(
         employees.map(id => notifyMorningPunchIn(id))
@@ -327,7 +277,6 @@ const cronTasks = {
       const successful = results.filter(r => r.status === 'fulfilled').length;
       const failed = results.filter(r => r.status === 'rejected').length;
 
-      console.log(`✅ Morning punch-in: ${successful} successful, ${failed} failed`);
       return {
         success: true,
         count: employees.length,
@@ -342,17 +291,13 @@ const cronTasks = {
 
   notifyMorningPunchOut: async () => {
     try {
-      console.log('⏰ Running cron: Morning punch-out reminders');
       await updateCronRun('notifyMorningPunchOut');
 
       const employees = await getEmployeesToNotify('morning_out');
 
       if (employees.length === 0) {
-        console.log('✅ No employees need morning punch-out reminders');
         return { success: true, count: 0 };
       }
-
-      console.log(`⏰ Sending morning punch-out reminders to ${employees.length} employees`);
 
       const results = await Promise.allSettled(
         employees.map(id => notifyMorningPunchOut(id))
@@ -361,7 +306,6 @@ const cronTasks = {
       const successful = results.filter(r => r.status === 'fulfilled').length;
       const failed = results.filter(r => r.status === 'rejected').length;
 
-      console.log(`✅ Morning punch-out: ${successful} successful, ${failed} failed`);
       return {
         success: true,
         count: employees.length,
@@ -376,17 +320,13 @@ const cronTasks = {
 
   notifyEveningPunchIn: async () => {
     try {
-      console.log('⏰ Running cron: Evening punch-in reminders');
       await updateCronRun('notifyEveningPunchIn');
 
       const employees = await getEmployeesToNotify('evening_in');
 
       if (employees.length === 0) {
-        console.log('✅ No employees need evening punch-in reminders');
         return { success: true, count: 0 };
       }
-
-      console.log(`⏰ Sending evening punch-in reminders to ${employees.length} employees`);
 
       const results = await Promise.allSettled(
         employees.map(id => notifyEveningPunchIn(id))
@@ -395,7 +335,6 @@ const cronTasks = {
       const successful = results.filter(r => r.status === 'fulfilled').length;
       const failed = results.filter(r => r.status === 'rejected').length;
 
-      console.log(`✅ Evening punch-in: ${successful} successful, ${failed} failed`);
       return {
         success: true,
         count: employees.length,
@@ -410,17 +349,13 @@ const cronTasks = {
 
   notifyEveningPunchOut: async () => {
     try {
-      console.log('⏰ Running cron: Evening punch-out reminders');
       await updateCronRun('notifyEveningPunchOut');
 
       const employees = await getEmployeesToNotify('evening_out');
 
       if (employees.length === 0) {
-        console.log('✅ No employees need evening punch-out reminders');
         return { success: true, count: 0 };
       }
-
-      console.log(`⏰ Sending evening punch-out reminders to ${employees.length} employees`);
 
       const results = await Promise.allSettled(
         employees.map(id => notifyEveningPunchOut(id))
@@ -429,7 +364,6 @@ const cronTasks = {
       const successful = results.filter(r => r.status === 'fulfilled').length;
       const failed = results.filter(r => r.status === 'rejected').length;
 
-      console.log(`✅ Evening punch-out: ${successful} successful, ${failed} failed`);
       return {
         success: true,
         count: employees.length,
@@ -444,9 +378,7 @@ const cronTasks = {
 
   sendCelebrationNotifications: async () => {
     try {
-      console.log('🎉 Running cron: Send celebration notifications');
       await updateCronRun('sendCelebrationNotifications');
-
       const result = await sendCelebrationNotifications();
       return result;
     } catch (error) {
@@ -540,7 +472,7 @@ exports.notifyMorningPunchOut = cron.schedule(
   }
 );
 
-// Evening Punch-In: 2:00 PM (Adjust as needed)
+// Evening Punch-In: 2:00 PM
 exports.notifyEveningPunchIn = cron.schedule(
   '0 14 * * *',
   cronTasks.notifyEveningPunchIn,
@@ -550,7 +482,7 @@ exports.notifyEveningPunchIn = cron.schedule(
   }
 );
 
-// Evening Punch-Out: 6:00 PM (Adjust as needed)
+// Evening Punch-Out: 6:00 PM
 exports.notifyEveningPunchOut = cron.schedule(
   '0 18 * * *',
   cronTasks.notifyEveningPunchOut,
@@ -571,7 +503,7 @@ exports.sendCelebrationNotifications = cron.schedule(
 );
 
 exports.sendTestNotification = cron.schedule(
-  '53 16 * * *',
+  '38 14 * * *',
   cronTasks.sendTestNotification,
   {
     scheduled: true,
@@ -579,21 +511,15 @@ exports.sendTestNotification = cron.schedule(
   }
 );
 
-
 /* ───────────────────────────────────────────────
    🚀 START ALL CRON JOBS
 ─────────────────────────────────────────────── */
 exports.startCronJobs = async () => {
-  console.log('🕒 Starting cron jobs...');
-
   try {
-    // Initialize celebration scheduler if needed
     if (scheduleCelebrationNotifications) {
       scheduleCelebrationNotifications();
-      console.log('✅ Celebration scheduler initialized');
     }
 
-    // Start all cron jobs
     const jobs = [
       exports.autoCheckoutEmployees,
       exports.markAbsentEmployees,
@@ -609,8 +535,6 @@ exports.startCronJobs = async () => {
     ];
 
     jobs.forEach(job => job.start());
-
-    console.log('✅ All cron jobs started successfully');
   } catch (error) {
     console.error('❌ Failed to start cron jobs:', error);
   }
@@ -620,8 +544,6 @@ exports.startCronJobs = async () => {
    ⏸️ STOP ALL CRON JOBS (for testing/shutdown)
 ─────────────────────────────────────────────── */
 exports.stopCronJobs = () => {
-  console.log('🛑 Stopping all cron jobs...');
-
   const jobs = [
     exports.autoCheckoutEmployees,
     exports.markAbsentEmployees,
@@ -637,8 +559,6 @@ exports.stopCronJobs = () => {
   ];
 
   jobs.forEach(job => job.stop());
-
-  console.log('✅ All cron jobs stopped');
 };
 
 /* ───────────────────────────────────────────────
@@ -657,7 +577,6 @@ exports.getCronStatus = () => {
     { name: 'notifyEveningPunchOut', task: exports.notifyEveningPunchOut },
     { name: 'sendCelebrationNotifications', task: exports.sendCelebrationNotifications },
     { name: 'sendTestNotification', task: exports.sendTestNotification },
-
   ];
 
   return jobs.map(job => ({
@@ -667,5 +586,5 @@ exports.getCronStatus = () => {
   }));
 };
 
-// ✅ Export tasks for manual testing/triggering
+// Export tasks for manual testing/triggering
 exports.cronTasks = cronTasks;

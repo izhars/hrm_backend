@@ -6,7 +6,6 @@ const moment = require('moment-timezone');
 // 🧪 Manual test: Auto checkout
 exports.testAutoCheckout = async (req, res) => {
   try {
-    console.log('🧪 Manual test: Auto checkout triggered');
     const result = await cronTasks.autoCheckoutEmployees();
     res.json({
       success: true,
@@ -25,7 +24,6 @@ exports.testAutoCheckout = async (req, res) => {
 // 🧪 Manual test: Mark absent
 exports.testMarkAbsent = async (req, res) => {
   try {
-    console.log('🧪 Manual test: Mark absent triggered');
     const result = await cronTasks.markAbsentEmployees();
     res.json({
       success: true,
@@ -44,7 +42,6 @@ exports.testMarkAbsent = async (req, res) => {
 // 🧪 Manual test: Birthday wishes
 exports.testBirthdayWishes = async (req, res) => {
   try {
-    console.log('🧪 Manual test: Birthday wishes triggered');
     const result = await cronTasks.sendBirthdayWishes();
     res.json({
       success: true,
