@@ -2,7 +2,7 @@
 const Expense = require('../models/Expense');
 const Category = require('../models/ExpenseCategory');
 const { validationResult } = require('express-validator');
-const AppError = require('../utils/AppError');
+const AppError = require('../utils/appError');
 
 // ✅ UPDATE THIS IMPORT - Use the specialized functions
 const { 

@@ -1,6 +1,6 @@
 // controllers/expenseCategoryController.js
 const Category = require('../models/ExpenseCategory');
-const AppError = require('../utils/AppError');
+const AppError = require('../utils/appError');
 
 exports.createCategory = async (req, res, next) => {
   try {

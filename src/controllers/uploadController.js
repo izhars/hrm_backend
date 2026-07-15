@@ -9,7 +9,7 @@ const {
 const Message = require('../models/Message');
 const User = require('../models/User');
 const Conversation = require('../models/Conversation');
-const AppError = require('../utils/AppError');
+const AppError = require('../utils/appError');
 
 // ============================
 // GROUP AVATAR UPLOAD
