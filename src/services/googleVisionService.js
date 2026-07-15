@@ -1,30 +1,52 @@
 // services/googleVisionService.js
+const crypto = require('crypto');
 const vision = require('@google-cloud/vision');
 const fs = require('fs'); // 👈 sync fs
 const path = require('path');
 
 class GoogleVisionService {
   constructor() {
+    this.client = null;
+    this.enabled = false;
+    this.credentialsPath = null;
+    this.MAX_IMAGE_SIZE = 4 * 1024 * 1024;
+    this.RECOMMENDED_SIZE = 2 * 1024 * 1024;
+    this.MAX_DIMENSION = 1600;
+    this.JPEG_QUALITY = 85;
+
     try {
       console.log('Initializing Google Vision Service...');
 
-      // ✅ ALWAYS resolve relative to this file
-      const credentialsPath = path.resolve(
+      const envCredentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.GOOGLE_CREDENTIALS_PATH;
+      const envCredentialsJson = process.env.GOOGLE_VISION_CREDENTIALS_JSON || process.env.GOOGLE_CREDENTIALS_JSON;
+
+      this.credentialsPath = envCredentialsPath || path.resolve(
         __dirname,
         '../config/google-credentials.json'
       );
 
-      console.log('Looking for credentials at:', credentialsPath);
+      console.log('Looking for credentials at:', this.credentialsPath);
 
-      // ✅ Correct existence check
-      if (!fs.existsSync(credentialsPath)) {
-        console.error('❌ Google credentials file not found at:', credentialsPath);
-        throw new Error(`Google credentials file not found at ${credentialsPath}`);
+      if (envCredentialsJson) {
+        const parsedCredentials = JSON.parse(envCredentialsJson);
+        this.client = new vision.ImageAnnotatorClient({
+          credentials: parsedCredentials
+        });
+        this.enabled = true;
+        console.log('✅ Google Vision client initialized from environment credentials');
+        console.log('📋 Project ID:', parsedCredentials.project_id);
+        return;
       }
 
-      // Load credentials
+      if (!fs.existsSync(this.credentialsPath)) {
+        console.warn('⚠️ Google credentials file not found at:', this.credentialsPath);
+        console.warn('⚠️ Google Vision will be disabled for this deployment.');
+        this.enabled = false;
+        return;
+      }
+
       const credentials = JSON.parse(
-        fs.readFileSync(credentialsPath, 'utf8')
+        fs.readFileSync(this.credentialsPath, 'utf8')
       );
 
       if (!credentials.project_id) {
@@ -35,17 +57,18 @@ class GoogleVisionService {
         console.warn('⚠️ credentials.json missing private_key');
       }
 
-      // Initialize Vision client
       this.client = new vision.ImageAnnotatorClient({
-        keyFilename: credentialsPath
+        keyFilename: this.credentialsPath
       });
 
+      this.enabled = true;
       console.log('✅ Google Vision client initialized');
       console.log('📋 Project ID:', credentials.project_id);
 
     } catch (error) {
-      console.error('❌ Google Vision initialization failed:', error.message);
-      throw error;
+      console.error('⚠️ Google Vision initialization failed:', error.message);
+      this.client = null;
+      this.enabled = false;
     }
   }
 
@@ -298,6 +321,14 @@ class GoogleVisionService {
     try {
       console.log('\n🔍 Starting face detection...');
 
+      if (!this.enabled || !this.client) {
+        return {
+          success: false,
+          message: 'Google Vision is not configured on this server. Face recognition is unavailable.',
+          code: 'VISION_NOT_CONFIGURED'
+        };
+      }
+
       const processedImage = await this.prepareImageForVision(imageBase64, 'detect-faces');
 
       console.log('   📡 Calling Vision API...');
@@ -375,6 +406,14 @@ class GoogleVisionService {
   async compareFaces(image1Base64, image2Base64) {
     try {
       console.log('\n🔄 Starting face comparison...');
+
+      if (!this.enabled || !this.client) {
+        return {
+          success: false,
+          message: 'Google Vision is not configured on this server. Face comparison is unavailable.',
+          code: 'VISION_NOT_CONFIGURED'
+        };
+      }
 
       // Prepare both images
       const [processedImage1, processedImage2] = await Promise.all([
