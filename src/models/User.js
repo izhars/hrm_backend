@@ -378,7 +378,14 @@ userSchema.virtual('daysToAnniversary').get(function () {
 
 // 1. Hash password
 userSchema.pre('save', async function (next) {
+  // Only hash if password is modified AND it's not already hashed
   if (!this.isModified('password')) return next();
+  
+  // Check if password already looks hashed (starts with $2a$, $2b$, or $2y$)
+  if (this.password.startsWith('$2a$') || this.password.startsWith('$2b$') || this.password.startsWith('$2y$')) {
+    return next(); // Skip hashing if already hashed
+  }
+  
   try {
     const salt = await bcrypt.genSalt(12);
     this.password = await bcrypt.hash(this.password, salt);

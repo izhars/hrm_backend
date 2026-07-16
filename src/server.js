@@ -10,7 +10,7 @@ const connectDB = require('./config/db');
 const errorHandler = require('./middleware/errorHandler');
 const cronJobs = require('./utils/cronJobs');
 const emailService = require('./utils/emailService');
-const createSuperAdmin = require('./seedAdmin');
+const createSuperAdmin = require('../seedAdmin');
 const { initSocket } = require('./socket');
 
 // Firebase Admin
@@ -52,9 +52,9 @@ const roleRoutes = require('./routes/roleRoutes');
 const tokenRoutes = require('./routes/tokenRoutes');
 const debugRoutes = require('./routes/debugRoutes');
 const dailyTaskRoutes = require('./routes/dailyTaskRoutes');
-const callRoutes = require('./routes/callRoutes');  
+const callRoutes = require('./routes/callRoutes');
 const employeeInteractionRoutes = require('./routes/employeeInteractionRoutes');
-const face = require('./routes/faceRecognitionRoutes'); 
+const face = require('./routes/faceRecognitionRoutes');
 const rfidRoutes = require('./routes/rfidRoutes'); // RFID routes
 const numberPlateRoutes = require('./routes/numberPlateRoutes');
 
@@ -74,10 +74,30 @@ app.use(
     },
   })
 );
-app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:3000',
-  credentials: true
-}));
+
+
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://localhost:3001",
+  process.env.CLIENT_URL
+].filter(Boolean);
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      console.log("❌ Blocked by CORS:", origin);
+      callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+  })
+);
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 

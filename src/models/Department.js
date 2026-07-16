@@ -38,13 +38,8 @@ const departmentSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes for performance
-departmentSchema.index({ name: 1 });
-departmentSchema.index({ code: 1 });
 departmentSchema.index({ isActive: 1 });
-// _id index is automatically created by MongoDB, no need to add
 
-// Maintain employeeCount
 departmentSchema.pre('save', async function (next) {
   if (!this.isModified('employeeCount')) return next();
   if (this.employeeCount < 0) {
